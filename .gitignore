@@ -1,0 +1,63 @@
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 环境变量（含 API Key，绝对不能上传）
+.env
+.env.local
+.env.*.local
+
+# 日志
+logs/
+*.log
+
+# 数据库数据卷（Docker 挂载的数据）
+docker-data/
+docker-data-redis/
+
+# 向量数据库（可以重新生成）
+data/vectorstore/
+
+# 构建产物
+*.egg-info/
+dist/
+build/
+
+# IDE 配置（可选，按个人喜好）
+.idea/
+.vscode/
+*.iml
+
+# 测试缓存
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 临时文件
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# 课件、私人笔记（不上传）
+知行旅行助手课件_2026-05-21 08-05-57/
+笔记/
+学习计划.md
+项目精讲笔记.md
+TROUBLESHOOTING.md
+text.md
+
+# IDE 自动生成的代码文档（每个 .py 旁边的同名 .md）
+app/**/*.md
+scripts/*.md
+tests/*.md
+
+# Trae IDE 生成的 specs 文件
+.trae/
