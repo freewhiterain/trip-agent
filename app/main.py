@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.utils.logger import app_logger
-from app.api.v1 import conversations, chat, users
+from app.api.v1 import conversations, chat, planning, users
 
 
 @asynccontextmanager
@@ -58,7 +58,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -67,6 +67,7 @@ app.add_middleware(
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(conversations.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
+app.include_router(planning.router, prefix="/api/v1")
 
 
 @app.get("/")

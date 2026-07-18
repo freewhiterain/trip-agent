@@ -44,3 +44,20 @@ class PreferenceRecord(BaseModel):
     source: str = "user_confirmed"
     confirmed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: ApprovalDecision
+    payload: dict[str, Any] | None = None
+
+
+class ItinerarySaveRequest(BaseModel):
+    task_id: str
+    title: str = Field(min_length=1, max_length=200)
+    content: dict[str, Any]
+
+
+class PreferenceProposalRequest(BaseModel):
+    task_id: str
+    key: str = Field(min_length=1, max_length=80)
+    value: Any

@@ -9,8 +9,23 @@
 """
 import sys
 import io
+import re
 from loguru import logger
 from app.config import settings
+
+
+SENSITIVE_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|authorization|password|token|secret)(\s*[=:]\s*)([^\s,;&]+)"
+)
+
+
+def redact_text(value: str) -> str:
+    """隐藏日志消息中常见的密钥和凭据。"""
+    return SENSITIVE_PATTERN.sub(r"\1\2***", value)
+
+
+def _redact_record(record):
+    record["message"] = redact_text(str(record["message"]))
 
 
 def _get_stdout_sink():
@@ -33,6 +48,8 @@ def setup_logger():
 
     # 移除默认处理器
     logger.remove()
+
+    logger.configure(patcher=_redact_record)
 
     # 控制台日志（开发环境彩色输出）
     logger.add(
@@ -63,7 +80,7 @@ def setup_logger():
         compression="zip",
         level="ERROR",
         backtrace=True,         # 记录异常堆栈
-        diagnose=True           # 记录变量值
+        diagnose=False          # 禁止异常日志输出局部变量中的密钥和用户数据
     )
 
     logger.info("✅ 日志系统初始化完成")

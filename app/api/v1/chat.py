@@ -3,6 +3,7 @@
 """
 import json
 import asyncio
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,13 @@ from app.models.message import Message
 from app.schemas.message import MessageCreate
 from app.api.dependencies import get_current_user
 from app.agents.factory import create_chat_agent
+from app.agents.supervisor import run_travel_planning
+from app.config import settings
+from app.core.checkpointer import get_checkpointer
+from app.governance.events import PublishingEventRepository, TaskEventService
+from app.governance.postgres import PostgresEventRepository
+from app.schemas.events import SSEEvent
+from app.services.planning import RequirementExtractor, render_plan_markdown
 from app.utils.logger import app_logger
 
 router = APIRouter(prefix="/chat", tags=["对话"])
@@ -48,6 +56,120 @@ def sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+EVENT_TYPE_MAP = {
+    "task_created": "task",
+    "plan_created": "plan",
+    "worker_started": "worker",
+    "worker_completed": "worker",
+    "evidence_collected": "evidence",
+    "approval_requested": "approval",
+    "approval_received": "approval",
+    "plan_generated": "result",
+    "task_completed": "task",
+    "task_failed": "error",
+}
+
+
+def _public_error(exc: Exception) -> dict:
+    if isinstance(exc, ValueError):
+        return {"code": "validation_error", "message": str(exc), "retryable": False}
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return {"code": "timeout", "message": "外部服务响应超时，请稍后重试。", "retryable": True}
+    return {"code": "internal_error", "message": "旅行规划暂时无法完成，请稍后重试。", "retryable": True}
+
+
+async def generate_supervisor_sse_stream(
+    conversation_id: str,
+    user_message: str,
+    user_id: str,
+):
+    task_id = uuid4().hex
+    sequence = 0
+
+    def event(event_type: str, payload: dict | None = None):
+        nonlocal sequence
+        sequence += 1
+        return SSEEvent(
+            type=event_type,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            sequence=sequence,
+            payload=payload or {},
+        ).legacy_payload()
+
+    try:
+        async with async_session_maker() as db:
+            history_result = await db.execute(
+                select(Message.content)
+                .where(Message.conversation_id == conversation_id, Message.role == "user")
+                .order_by(Message.created_at.desc())
+                .limit(6)
+            )
+            recent_user_messages = list(reversed(history_result.scalars().all()))
+        requirement_context = "\n".join(recent_user_messages) or user_message
+        draft_requirement = await RequirementExtractor().extract(requirement_context)
+        missing = draft_requirement.missing_fields()
+        if missing:
+            content = f"为了开始并行规划，还需要你提供：{'、'.join(missing)}。"
+            yield sse(event("token", {"content": content}))
+            async with async_session_maker() as db:
+                await save_message(db, conversation_id, "assistant", content)
+            yield sse(event("done"))
+            return
+
+        requirement = draft_requirement.to_requirement()
+        queue: asyncio.Queue = asyncio.Queue()
+        publishing_repository = PublishingEventRepository(
+            PostgresEventRepository(),
+            queue.put,
+        )
+        planning_task = asyncio.create_task(
+            run_travel_planning(
+                requirement,
+                checkpointer=await get_checkpointer(),
+                event_service=TaskEventService(publishing_repository),
+                task_id=task_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        )
+
+        while not planning_task.done() or not queue.empty():
+            try:
+                stored_event = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            sequence = max(sequence, stored_event.sequence)
+            mapped_type = EVENT_TYPE_MAP.get(stored_event.event_type, "task")
+            yield sse(
+                SSEEvent(
+                    type=mapped_type,
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                    sequence=stored_event.sequence,
+                    payload={"event": stored_event.event_type, **stored_event.payload},
+                ).legacy_payload()
+            )
+
+        draft = await planning_task
+        markdown = render_plan_markdown(draft)
+        yield sse(event("result", {"draft": draft.model_dump(mode="json")}))
+        yield sse(event("token", {"content": markdown}))
+        async with async_session_maker() as db:
+            await save_message(
+                db,
+                conversation_id,
+                "assistant",
+                markdown,
+                {"task_id": task_id, "draft": draft.model_dump(mode="json")},
+            )
+        yield sse(event("done"))
+    except Exception as exc:
+        app_logger.exception("Supervisor SSE 旅行规划错误")
+        yield sse(event("error", _public_error(exc)))
+        yield sse(event("done"))
+
+
 async def generate_sse_stream(
         conversation_id: str,
         user_message: str,
@@ -60,6 +182,15 @@ async def generate_sse_stream(
         # 用独立 session 保存用户消息
         async with async_session_maker() as db:
             await save_message(db, conversation_id, "user", user_message)
+
+        if settings.travel_agent_mode.strip().lower() == "supervisor":
+            async for frame in generate_supervisor_sse_stream(
+                conversation_id,
+                user_message,
+                user_id,
+            ):
+                yield frame
+            return
 
         # 创建 agent
         agent = await create_chat_agent()

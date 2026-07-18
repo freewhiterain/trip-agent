@@ -38,6 +38,30 @@ class TravelRequirement(BaseModel):
         return self
 
 
+class TravelRequirementDraft(BaseModel):
+    """自然语言需求提取的中间结果；缺失字段不会被模型臆造。"""
+
+    origin: str | None = None
+    destination: str | None = None
+    departure_date: date | None = None
+    days: int | None = Field(default=None, ge=1, le=30)
+    adults: int = Field(default=1, ge=1, le=30)
+    children: int = Field(default=0, ge=0, le=20)
+    budget: float | None = Field(default=None, gt=0)
+    styles: list[str] = Field(default_factory=list)
+    special_needs: list[str] = Field(default_factory=list)
+
+    def missing_fields(self) -> list[str]:
+        labels = {"origin": "出发地", "destination": "目的地", "departure_date": "出发日期", "days": "出行天数"}
+        return [label for field, label in labels.items() if getattr(self, field) is None]
+
+    def to_requirement(self) -> TravelRequirement:
+        missing = self.missing_fields()
+        if missing:
+            raise ValueError(f"旅行需求缺少：{', '.join(missing)}")
+        return TravelRequirement(**self.model_dump())
+
+
 class ResearchTask(BaseModel):
     """Planner 生成的可调度研究任务。"""
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from app.schemas.governance import TaskEventRecord
@@ -52,3 +53,19 @@ class TaskEventService:
                 payload=payload or {},
             )
         )
+
+
+class PublishingEventRepository:
+    """持久化事件后同步发布给当前 SSE 消费者。"""
+
+    def __init__(self, inner: EventRepository, publish: Callable[[TaskEventRecord], Awaitable[None]]):
+        self.inner = inner
+        self.publish = publish
+
+    async def append(self, event: TaskEventRecord) -> TaskEventRecord:
+        stored = await self.inner.append(event)
+        await self.publish(stored)
+        return stored
+
+    async def list(self, task_id: str, user_id: str) -> list[TaskEventRecord]:
+        return await self.inner.list(task_id, user_id)

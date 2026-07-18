@@ -34,7 +34,7 @@ class Settings(BaseSettings):
         default="development-only-change-me",
         alias="JWT_SECRET_KEY",
     )
-    travel_agent_mode: str = Field(default="legacy", alias="TRAVEL_AGENT_MODE")
+    travel_agent_mode: str = Field(default="supervisor", alias="TRAVEL_AGENT_MODE")
     allow_legacy_fallback: bool = Field(default=True, alias="ALLOW_LEGACY_FALLBACK")
     enable_external_tools: bool = Field(default=False, alias="ENABLE_EXTERNAL_TOOLS")
 
