@@ -1,0 +1,82 @@
+import asyncio
+from datetime import date
+
+import pytest
+
+from app.agents.supervisor import run_travel_planning
+from app.agents.workers.base import TravelWorker
+from app.agents.workers.registry import WorkerRegistry
+from app.schemas.planning import ResearchTask, TravelRequirement, WorkerResult
+
+
+def requirement():
+    return TravelRequirement(
+        origin="上海",
+        destination="成都",
+        departure_date=date(2026, 8, 1),
+        days=5,
+        adults=2,
+        budget=6000,
+        styles=["文化", "美食"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_supervisor_returns_full_draft_without_fake_realtime_facts():
+    draft = await run_travel_planning(requirement())
+
+    assert len(draft.worker_results) == 5
+    assert {result.worker for result in draft.worker_results} == {
+        "destination",
+        "transport",
+        "hotel",
+        "food",
+        "weather",
+    }
+    assert len(draft.itinerary) == 5
+    assert [slot.period for slot in draft.itinerary[0].slots] == [
+        "morning",
+        "afternoon",
+        "evening",
+    ]
+    assert draft.budget.total_estimate is None
+    assert any("实时" in warning for warning in draft.warnings)
+    assert "订单" not in draft.model_dump_json()
+    assert "支付" not in draft.model_dump_json()
+
+
+class CountingWorker(TravelWorker):
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+
+    async def run(self, task: ResearchTask, requirement: TravelRequirement) -> WorkerResult:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.02)
+        self.active -= 1
+        return WorkerResult(
+            task_id=task.id,
+            worker=task.task_type,
+            status="completed",
+            summary="ok",
+        )
+
+
+@pytest.mark.asyncio
+async def test_supervisor_executes_independent_workers_in_parallel():
+    worker = CountingWorker()
+    registry = WorkerRegistry(
+        {
+            "destination": worker,
+            "transport": worker,
+            "hotel": worker,
+            "food": worker,
+            "weather": worker,
+        }
+    )
+
+    draft = await run_travel_planning(requirement(), registry)
+
+    assert len(draft.worker_results) == 5
+    assert worker.max_active >= 2
