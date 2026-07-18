@@ -14,7 +14,7 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 from app.schemas.message import MessageCreate
 from app.api.dependencies import get_current_user
-from app.agents.handoffs.travel_agent import create_travel_agent
+from app.agents.factory import create_chat_agent
 from app.utils.logger import app_logger
 
 router = APIRouter(prefix="/chat", tags=["对话"])
@@ -62,7 +62,7 @@ async def generate_sse_stream(
             await save_message(db, conversation_id, "user", user_message)
 
         # 创建 agent
-        agent = await create_travel_agent()
+        agent = await create_chat_agent()
 
         # 输入必须是字典格式（LangGraph StateGraph 期望 state 的部分更新）
         input_data = {

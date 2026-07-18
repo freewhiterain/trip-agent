@@ -1,7 +1,7 @@
 """
 会话相关的 Pydantic 模型
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 from datetime import datetime
 import uuid
@@ -20,6 +20,8 @@ class ConversationUpdate(BaseModel):
 
 class ConversationResponse(BaseModel):
     """会话响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     user_id: uuid.UUID
     title: str
@@ -27,6 +29,3 @@ class ConversationResponse(BaseModel):
     extra_info: dict
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True

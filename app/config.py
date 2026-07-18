@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     debug: bool = Field(default=False, alias="DEBUG")
+    jwt_secret_key: str = Field(
+        default="development-only-change-me",
+        alias="JWT_SECRET_KEY",
+    )
+    travel_agent_mode: str = Field(default="legacy", alias="TRAVEL_AGENT_MODE")
+    allow_legacy_fallback: bool = Field(default=True, alias="ALLOW_LEGACY_FALLBACK")
 
     # ============== LLM 配置 ==============
     dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
@@ -65,6 +71,14 @@ class Settings(BaseSettings):
     # ============== MCP 服务配置 ==============
     amap_api_key: str = Field(default="", alias="AMAP_API_KEY")
     tavily_api_key: str = Field(default="", alias="TAVILY_API_KEY")
+
+    def validate_security(self) -> None:
+        """拒绝在非开发环境使用公开的默认 JWT 密钥。"""
+        if (
+            self.app_env.lower() not in {"development", "dev", "test"}
+            and self.jwt_secret_key == "development-only-change-me"
+        ):
+            raise RuntimeError("生产环境必须配置独立的 JWT_SECRET_KEY")
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),

@@ -17,7 +17,7 @@ from app.tools.state_transition import (
     select_food_tool,
     generate_itinerary_tool,
     summarize_budget_tool,
-    generate_order_tool,
+    confirm_plan_draft_tool,
     ALL_ROLLBACK_TOOLS
 )
 from app.tools.router_query import query_destination_info
@@ -69,7 +69,7 @@ async def create_travel_agent():
         select_food_tool,
         generate_itinerary_tool,
         summarize_budget_tool,
-        generate_order_tool,
+        confirm_plan_draft_tool,
         query_destination_info,
         query_transport_options,
         *ALL_ROLLBACK_TOOLS,

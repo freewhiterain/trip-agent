@@ -306,7 +306,7 @@ def summarize_budget_tool(
         runtime: ToolRuntime[None, TravelState] = None
 ) -> Command:
     """
-    汇总各项费用，生成预算明细，并转换到订单生成步骤。
+    汇总各项费用，生成预算明细，并转换到行程草稿确认步骤。
     包含：交通、住宿、餐饮、景点门票、其他杂费。
     """
     app_logger.info("开始计算预算...")
@@ -346,36 +346,35 @@ def summarize_budget_tool(
             )
         ],
         "budget": budget_breakdown,
-        "current_step": "order_generation"
+        "plan_status": "draft",
+        "current_step": "plan_review"
     })
 
 
-# ============== 8. 订单生成工具 ==============
+# ============== 8. 行程草稿确认工具 ==============
 
 @tool
-def generate_order_tool(
+def confirm_plan_draft_tool(
         runtime: ToolRuntime[None, TravelState] = None
 ) -> Command:
     """
-    生成最终订单，完成整个旅行规划流程。
-    包含订单号、完整行程、预算明细。
-    """
-    app_logger.info("生成订单...")
+    确认当前行程草稿，完成首版旅行规划流程。
 
-    import uuid
-    order_id = f"ORDER-{uuid.uuid4().hex[:8].upper()}"
+    此操作只更新会话内的规划状态，不创建订单、不执行预订、
+    不发起支付，也不向外部平台发送数据。
+    """
+    app_logger.info("确认行程草稿")
 
     return Command(update={
         "messages": [
             ToolMessage(
-                content=f"🎉 订单生成成功！\n"
-                        f"订单号：{order_id}\n"
-                        f"支付链接：https://pay.example.com/{order_id}\n\n"
-                        f"感谢使用智能旅行规划系统！",
+                content="✅ 行程草稿已确认。当前版本仅提供规划与推荐，"
+                        "不会创建订单、执行预订或发起支付。",
                 tool_call_id=runtime.tool_call_id
             )
         ],
-        "order_id": order_id,
+        "plan_status": "confirmed",
+        "current_step": "planning_complete",
     })
 
 
@@ -389,7 +388,8 @@ ALL_STEPS = [
     "food_planning",
     "itinerary_generation",
     "budget_summarization",
-    "order_generation"
+    "plan_review",
+    "planning_complete",
 ]
 
 STEP_LABELS = {
@@ -400,7 +400,8 @@ STEP_LABELS = {
     "food_planning": "餐饮规划",
     "itinerary_generation": "行程生成",
     "budget_summarization": "预算汇总",
-    "order_generation": "订单生成"
+    "plan_review": "草稿确认",
+    "planning_complete": "规划完成",
 }
 
 STEP_STATE_FIELDS = {
@@ -411,7 +412,8 @@ STEP_STATE_FIELDS = {
     "food_planning": ["selected_food_types", "food_options"],
     "itinerary_generation": ["itinerary"],
     "budget_summarization": ["budget"],
-    "order_generation": ["order_id"]
+    "plan_review": ["plan_status"],
+    "planning_complete": [],
 }
 
 
@@ -424,7 +426,8 @@ def go_back_to_step(
             "accommodation_planning",
             "food_planning",
             "itinerary_generation",
-            "budget_summarization"
+            "budget_summarization",
+            "plan_review",
         ],
         reason: str,
         clear_subsequent_data: bool = True,
@@ -445,9 +448,9 @@ def go_back_to_step(
             "messages": [ToolMessage(content=f"无效的目标步骤: {target_step}", tool_call_id=runtime.tool_call_id)]
         })
 
-    if target_step == "order_generation":
+    if target_step == "planning_complete":
         return Command(update={
-            "messages": [ToolMessage(content="订单生成是最终步骤，无法回退到此步骤。", tool_call_id=runtime.tool_call_id)]
+            "messages": [ToolMessage(content="规划完成是最终状态，无法回退到此状态。", tool_call_id=runtime.tool_call_id)]
         })
 
     state_update = {"current_step": target_step}

@@ -15,7 +15,8 @@ PlanningStep = Literal[
     "food_planning",
     "itinerary_generation",
     "budget_summarization",
-    "order_generation"
+    "plan_review",
+    "planning_complete",
 ]
 
 TravelStyle = Literal["relaxation", "culture", "adventure", "food"]
@@ -110,7 +111,7 @@ class TravelState(AgentState):
     itinerary: NotRequired[list[ItineraryDay]]
     budget: NotRequired[BudgetBreakdown]
     report: NotRequired[str]
-    order_id: NotRequired[str]
+    plan_status: NotRequired[Literal["draft", "confirmed"]]
 
     approval_pending: NotRequired[bool]
     approval_reason: NotRequired[str]

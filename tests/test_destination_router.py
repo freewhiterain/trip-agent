@@ -5,6 +5,12 @@
 import asyncio
 import sys
 import os
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_EXTERNAL_TESTS") != "1",
+    reason="设置 RUN_EXTERNAL_TESTS=1 后运行真实模型集成测试",
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

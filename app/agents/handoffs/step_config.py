@@ -9,7 +9,7 @@ from app.tools.state_transition import (
     select_food_tool,
     generate_itinerary_tool,
     summarize_budget_tool,
-    generate_order_tool,
+    confirm_plan_draft_tool,
     go_back_to_requirement,
     go_back_to_destination,
     go_back_to_transport,
@@ -208,24 +208,23 @@ async def get_step_config():
             "requires": ["user_requirement", "itinerary"]
         },
 
-        "order_generation": {
-            "prompt": """你是订单处理专家。
+        "plan_review": {
+            "prompt": """你是旅行规划复核顾问。
 
-**当前阶段**：订单生成（第 8 步，共 8 步）🎉
+**当前阶段**：行程草稿确认（第 8 步，共 8 步）
 
 **任务**：
 1. 向用户展示最终行程和预算摘要
-2. 确认用户准备下单
-3. 调用 `generate_order_tool` 生成订单
-4. 提供订单号，感谢用户
+2. 明确说明当前版本只提供规划与推荐，不提供交易服务
+3. 用户确认草稿后调用 `confirm_plan_draft_tool`
 
-**回退选项**（最后修改机会）：
+**回退选项**：
 - 看预算 → `go_back_to_budget`
 - 改行程 → `go_back_to_itinerary`
 - 回到任意步骤 → `go_back_to_step`
 """,
             "tools": [
-                generate_order_tool,
+                confirm_plan_draft_tool,
                 go_back_to_budget,
                 go_back_to_itinerary,
                 go_back_to_food,
@@ -236,5 +235,21 @@ async def get_step_config():
                 go_back_to_step
             ],
             "requires": ["user_requirement", "itinerary", "budget"]
+        },
+
+        "planning_complete": {
+            "prompt": """旅行规划已经完成。你可以回答用户关于当前行程草稿的问题，
+但不得创建订单、预订、支付、退款、取消或改签。用户需要修改时，说明可以重新进入相应规划步骤。""",
+            "tools": [
+                go_back_to_budget,
+                go_back_to_itinerary,
+                go_back_to_food,
+                go_back_to_accommodation,
+                go_back_to_transport,
+                go_back_to_destination,
+                go_back_to_requirement,
+                go_back_to_step
+            ],
+            "requires": ["user_requirement", "itinerary", "budget", "plan_status"]
         }
     }

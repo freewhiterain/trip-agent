@@ -14,6 +14,8 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     import asyncio
 
+    settings.validate_security()
+
     loop = asyncio.get_running_loop()
     app_logger.info(f"FastAPI 使用的事件循环: {type(loop).__name__}")
 
