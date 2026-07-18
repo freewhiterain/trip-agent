@@ -1,11 +1,21 @@
 from app.agents.workers.base import TravelWorker
 from app.agents.workers.local_knowledge import load_destination_evidence
 from app.schemas.planning import CandidateOption, ResearchTask, TravelRequirement, WorkerResult
+from app.research.deep_research import DeepResearchService
 
 
 class DestinationWorker(TravelWorker):
+    def __init__(self, research: DeepResearchService | None = None):
+        self.research = research
+
     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> WorkerResult:
         evidence = load_destination_evidence(requirement.destination, "destination")
+        warnings = []
+        if not evidence and self.research is not None:
+            report = await self.research.research(task.query)
+            evidence = report.evidence
+            warnings.extend(report.warnings)
+            warnings.extend(report.conflicts)
         if not evidence:
             return WorkerResult(
                 task_id=task.id,
@@ -19,6 +29,7 @@ class DestinationWorker(TravelWorker):
             worker="destination",
             status="completed",
             summary=f"已找到{requirement.destination}的本地目的地资料。",
-            options=[CandidateOption(name=requirement.destination, category="destination", description="本地知识库已覆盖")],
+            options=[CandidateOption(name=requirement.destination, category="destination", description="已获得可追溯研究资料")],
             evidence=evidence,
+            warnings=warnings,
         )

@@ -29,6 +29,7 @@ class VectorStoreManager:
         app_logger.info(f"创建向量数据库（{len(documents)} 个文档）...")
         self.vectorstore = Chroma.from_documents(
             documents=documents,
+            ids=[str(doc.metadata["chunk_id"]) for doc in documents],
             embedding=self.embeddings,
             persist_directory=str(self.persist_directory),
             collection_name=self.collection_name

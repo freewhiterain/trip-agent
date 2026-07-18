@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     )
     travel_agent_mode: str = Field(default="legacy", alias="TRAVEL_AGENT_MODE")
     allow_legacy_fallback: bool = Field(default=True, alias="ALLOW_LEGACY_FALLBACK")
+    enable_external_tools: bool = Field(default=False, alias="ENABLE_EXTERNAL_TOOLS")
 
     # ============== LLM 配置 ==============
     dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
@@ -71,6 +72,10 @@ class Settings(BaseSettings):
     # ============== MCP 服务配置 ==============
     amap_api_key: str = Field(default="", alias="AMAP_API_KEY")
     tavily_api_key: str = Field(default="", alias="TAVILY_API_KEY")
+    mcp_weather_url: str = Field(default="", alias="MCP_WEATHER_URL")
+    mcp_search_url: str = Field(default="", alias="MCP_SEARCH_URL")
+    external_timeout_seconds: float = Field(default=10.0, alias="EXTERNAL_TIMEOUT_SECONDS")
+    external_max_retries: int = Field(default=2, alias="EXTERNAL_MAX_RETRIES")
 
     def validate_security(self) -> None:
         """拒绝在非开发环境使用公开的默认 JWT 密钥。"""

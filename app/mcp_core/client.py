@@ -31,19 +31,17 @@ class MCPClientManager:
             from langchain_mcp_adapters.client import MultiServerMCPClient
             from app.config import settings
 
-            # MCP 服务配置（第七章配置后取消注释）
-            mcp_config = {
-                # 自建天气服务
-                # "weather": {
-                #     "url": "http://localhost:9001/mcp",
-                #     "transport": "streamable_http"
-                # },
-                # 自建搜索服务
-                # "search": {
-                #     "url": "http://localhost:9002/mcp",
-                #     "transport": "streamable_http"
-                # },
-            }
+            mcp_config = {}
+            if settings.mcp_weather_url:
+                mcp_config["weather"] = {
+                    "url": settings.mcp_weather_url,
+                    "transport": "streamable_http",
+                }
+            if settings.mcp_search_url:
+                mcp_config["search"] = {
+                    "url": settings.mcp_search_url,
+                    "transport": "streamable_http",
+                }
 
             if mcp_config:
                 self.client = MultiServerMCPClient(mcp_config)

@@ -1,33 +1,40 @@
-"""阶段 1 使用的本地知识读取辅助函数。"""
+"""本地静态知识的 Hybrid RAG 查询入口。"""
 
-from pathlib import Path
+from functools import lru_cache
 
-from app.config import BASE_DIR
+from app.rag.document_loader import DocumentManager
+from app.rag.evidence import evidence_from_document
+from app.rag.reranker import RelevanceReranker
+from app.rag.retriever import HybridRetriever
+from app.rag.text_splitter import ParentDocumentSplitter
 from app.schemas.planning import Evidence
 
 
-DESTINATION_FILES = {
-    "成都": "chengdu.md",
-    "西安": "xian.md",
-}
+class LocalKnowledgeService:
+    def __init__(self):
+        documents = DocumentManager().load_all_documents()
+        parents, children = ParentDocumentSplitter().split_documents(documents)
+        self.retriever = HybridRetriever(
+            vectorstore=None,
+            documents=children,
+            parent_documents=parents,
+            reranker=RelevanceReranker(),
+            k=4,
+        )
+
+    def search(self, query: str) -> list[Evidence]:
+        return [evidence_from_document(document) for document in self.retriever.retrieve(query)]
+
+
+@lru_cache(maxsize=1)
+def get_local_knowledge_service() -> LocalKnowledgeService:
+    return LocalKnowledgeService()
 
 
 def load_destination_evidence(destination: str, topic: str) -> list[Evidence]:
-    filename = DESTINATION_FILES.get(destination)
-    if not filename:
-        return []
-
-    path = Path(BASE_DIR) / "data" / "documents" / "destinations" / filename
-    if not path.exists():
-        return []
-
-    content = path.read_text(encoding="utf-8")
+    items = get_local_knowledge_service().search(f"{destination} {topic}")
     return [
-        Evidence(
-            content=content[:1500],
-            source=f"本地目的地知识库：{path.stem}",
-            source_url=None,
-            confidence=0.75,
-            metadata={"path": str(path), "topic": topic, "static": True},
-        )
+        item
+        for item in items
+        if destination in item.content or destination in item.source
     ]

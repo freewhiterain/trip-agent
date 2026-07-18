@@ -6,6 +6,7 @@ from typing import List
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.documents import Document
 from app.utils.logger import app_logger
+from app.rag.identifiers import document_id
 
 
 class DocumentManager:
@@ -38,6 +39,7 @@ class DocumentManager:
         for doc in documents:
             doc.metadata["source_type"] = "destination_guide"
             doc.metadata["category"] = "destinations"
+            doc.metadata["document_id"] = document_id(doc)
 
         return documents
 
@@ -57,6 +59,7 @@ class DocumentManager:
         for doc in documents:
             doc.metadata["source_type"] = "food_guide"
             doc.metadata["category"] = "food"
+            doc.metadata["document_id"] = document_id(doc)
         return documents
 
     def load_accommodation_documents(self) -> List[Document]:
@@ -75,6 +78,7 @@ class DocumentManager:
         for doc in documents:
             doc.metadata["source_type"] = "accommodation_guide"
             doc.metadata["category"] = "accommodation"
+            doc.metadata["document_id"] = document_id(doc)
         return documents
 
     def load_all_documents(self) -> List[Document]:

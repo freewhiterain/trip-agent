@@ -5,6 +5,7 @@ from typing import List, Tuple
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.utils.logger import app_logger
+from app.rag.identifiers import document_id, stable_hash
 
 
 class ParentDocumentSplitter:
@@ -46,16 +47,25 @@ class ParentDocumentSplitter:
         child_docs = []
 
         for doc in documents:
+            doc_id = document_id(doc)
             parent_chunks = self.parent_splitter.split_documents([doc])
 
             for i, parent_chunk in enumerate(parent_chunks):
-                parent_id = f"{doc.metadata.get('source', 'unknown')}_{i}"
+                parent_id = stable_hash(doc_id, "parent", i)
+                parent_chunk.metadata["document_id"] = doc_id
                 parent_chunk.metadata["parent_id"] = parent_id
                 parent_docs.append(parent_chunk)
 
                 child_chunks = self.child_splitter.split_documents([parent_chunk])
-                for child_chunk in child_chunks:
+                for child_index, child_chunk in enumerate(child_chunks):
+                    child_chunk.metadata["document_id"] = doc_id
                     child_chunk.metadata["parent_id"] = parent_id
+                    child_chunk.metadata["chunk_id"] = stable_hash(
+                        parent_id,
+                        "child",
+                        child_index,
+                        child_chunk.page_content,
+                    )
                     child_docs.append(child_chunk)
 
         app_logger.info(f"切分完成: {len(parent_docs)} 个父文档, {len(child_docs)} 个子文档")
