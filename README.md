@@ -53,7 +53,7 @@ python scripts/test_llm.py
 ### 第五步：运行对话测试
 
 ```powershell
-python tests/handoffs_flow_test.py
+python -m pytest -q
 ```
 
 ### 第六步：初始化 RAG（可选，需要 DashScope Key）
