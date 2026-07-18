@@ -92,6 +92,10 @@ class UserMemoryService:
     def _get_current_time(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _require_approval(approval_id: str | None) -> None:
+        raise PermissionError("旧记忆写入入口已禁用；请使用 MemoryGovernanceService 完成审批和写入")
+
     async def get_user_profile(self, user_id: str) -> UserProfile:
         try:
             result = await self.store.aget(
@@ -105,7 +109,8 @@ class UserMemoryService:
             app_logger.error(f"❌ 获取用户画像失败: {e}")
             return UserProfile()
 
-    async def save_user_profile(self, user_id: str, profile: UserProfile):
+    async def save_user_profile(self, user_id: str, profile: UserProfile, approval_id: str | None = None):
+        self._require_approval(approval_id)
         profile.updated_at = self._get_current_time()
         await self.store.aput(
             namespace=("user_profiles", user_id),
@@ -114,26 +119,29 @@ class UserMemoryService:
         )
         app_logger.info(f"保存用户画像: {user_id}")
 
-    async def update_travel_styles(self, user_id: str, styles: List[str]):
+    async def update_travel_styles(self, user_id: str, styles: List[str], approval_id: str | None = None):
+        self._require_approval(approval_id)
         profile = await self.get_user_profile(user_id)
         current_styles = set(profile.travel_styles)
         current_styles.update(styles)
         profile.travel_styles = list(current_styles)
-        await self.save_user_profile(user_id, profile)
+        await self.save_user_profile(user_id, profile, approval_id)
 
-    async def update_dietary_restrictions(self, user_id: str, restrictions: List[str]):
+    async def update_dietary_restrictions(self, user_id: str, restrictions: List[str], approval_id: str | None = None):
+        self._require_approval(approval_id)
         profile = await self.get_user_profile(user_id)
         current = set(profile.dietary_restrictions)
         current.update(restrictions)
         profile.dietary_restrictions = list(current)
-        await self.save_user_profile(user_id, profile)
+        await self.save_user_profile(user_id, profile, approval_id)
 
-    async def update_food_preferences(self, user_id: str, preferences: List[str]):
+    async def update_food_preferences(self, user_id: str, preferences: List[str], approval_id: str | None = None):
+        self._require_approval(approval_id)
         profile = await self.get_user_profile(user_id)
         current = set(profile.food_preferences)
         current.update(preferences)
         profile.food_preferences = list(current)
-        await self.save_user_profile(user_id, profile)
+        await self.save_user_profile(user_id, profile, approval_id)
 
     async def get_travel_history(self, user_id: str) -> TravelHistory:
         try:
@@ -148,7 +156,8 @@ class UserMemoryService:
             app_logger.error(f"❌ 获取出行历史失败: {e}")
             return TravelHistory()
 
-    async def save_travel_history(self, user_id: str, history: TravelHistory):
+    async def save_travel_history(self, user_id: str, history: TravelHistory, approval_id: str | None = None):
+        self._require_approval(approval_id)
         history.updated_at = self._get_current_time()
         await self.store.aput(
             namespace=("travel_history", user_id),
@@ -163,8 +172,10 @@ class UserMemoryService:
             destination: str,
             start_date: str,
             end_date: str,
-            visited_attractions: List[str]
+            visited_attractions: List[str],
+            approval_id: str | None = None,
     ):
+        self._require_approval(approval_id)
         history = await self.get_travel_history(user_id)
         trip = TravelRecord(
             destination=destination,
@@ -176,15 +187,17 @@ class UserMemoryService:
         current_attractions = set(history.visited_attractions)
         current_attractions.update(visited_attractions)
         history.visited_attractions = list(current_attractions)
-        await self.save_travel_history(user_id, history)
+        await self.save_travel_history(user_id, history, approval_id)
         app_logger.info(f"添加旅行记录: {user_id} -> {destination}")
 
     async def update_accommodation_preference(
             self,
             user_id: str,
             preferred_types: List[str] = None,
-            avg_budget: float = None
+            avg_budget: float = None,
+            approval_id: str | None = None,
     ):
+        self._require_approval(approval_id)
         history = await self.get_travel_history(user_id)
         if preferred_types:
             current_types = set(history.accommodation_preference.preferred_types)
@@ -196,7 +209,7 @@ class UserMemoryService:
                 history.accommodation_preference.avg_budget_per_night = (old_budget + avg_budget) / 2
             else:
                 history.accommodation_preference.avg_budget_per_night = avg_budget
-        await self.save_travel_history(user_id, history)
+        await self.save_travel_history(user_id, history, approval_id)
 
     async def get_visited_destinations(self, user_id: str) -> List[str]:
         history = await self.get_travel_history(user_id)

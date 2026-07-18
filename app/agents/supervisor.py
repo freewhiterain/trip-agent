@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from operator import add
 from typing import Annotated, Any, TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
@@ -20,6 +21,7 @@ from app.schemas.planning import (
     TravelRequirement,
     WorkerResult,
 )
+from app.governance.events import TaskEventService
 
 
 class SupervisorState(TypedDict, total=False):
@@ -30,6 +32,9 @@ class SupervisorState(TypedDict, total=False):
     draft: dict[str, Any]
     status: str
     warnings: list[str]
+    task_id: str
+    user_id: str
+    conversation_id: str | None
 
 
 def _build_draft(
@@ -101,13 +106,30 @@ def _build_draft(
     )
 
 
-def create_supervisor_graph(registry: WorkerRegistry | None = None):
+def create_supervisor_graph(
+    registry: WorkerRegistry | None = None,
+    *,
+    checkpointer=None,
+    event_service: TaskEventService | None = None,
+):
     """创建支持动态并行 Worker 的 LangGraph。"""
     registry = registry or create_default_registry()
 
-    def planner_node(state: SupervisorState) -> dict[str, Any]:
+    async def emit(state: SupervisorState, event_type: str, payload: dict | None = None):
+        if event_service is not None:
+            await event_service.emit(
+                task_id=state["task_id"],
+                user_id=state["user_id"],
+                conversation_id=state.get("conversation_id"),
+                event_type=event_type,
+                payload=payload,
+            )
+
+    async def planner_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
         tasks = create_research_plan(requirement)
+        await emit(state, "task_created", {"destination": requirement.destination})
+        await emit(state, "plan_created", {"tasks": [task.model_dump(mode="json") for task in tasks]})
         return {
             "tasks": [task.model_dump(mode="json") for task in tasks],
             "status": "planned",
@@ -124,6 +146,9 @@ def create_supervisor_graph(registry: WorkerRegistry | None = None):
                     "requirement": state["requirement"],
                     "task": task,
                     "worker_results": [],
+                    "task_id": state["task_id"],
+                    "user_id": state["user_id"],
+                    "conversation_id": state.get("conversation_id"),
                 },
             )
             for task in tasks
@@ -132,13 +157,19 @@ def create_supervisor_graph(registry: WorkerRegistry | None = None):
     async def worker_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
         task = ResearchTask.model_validate(state["task"])
+        await emit(state, "worker_started", {"task_id": task.id, "worker": task.task_type})
         result = await registry.run(task, requirement)
+        await emit(state, "worker_completed", result.model_dump(mode="json"))
+        if result.evidence:
+            await emit(state, "evidence_collected", {"task_id": task.id, "count": len(result.evidence)})
         return {"worker_results": [result.model_dump(mode="json")]}
 
-    def synthesizer_node(state: SupervisorState) -> dict[str, Any]:
+    async def synthesizer_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
         results = [WorkerResult.model_validate(value) for value in state.get("worker_results", [])]
         draft = _build_draft(requirement, results)
+        await emit(state, "plan_generated", {"days": len(draft.itinerary), "warnings": len(draft.warnings)})
+        await emit(state, "task_completed", {"status": "completed"})
         return {
             "draft": draft.model_dump(mode="json"),
             "status": "completed",
@@ -157,21 +188,32 @@ def create_supervisor_graph(registry: WorkerRegistry | None = None):
     )
     workflow.add_edge("run_worker", "synthesize")
     workflow.add_edge("synthesize", END)
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 async def run_travel_planning(
     requirement: TravelRequirement,
     registry: WorkerRegistry | None = None,
+    *,
+    checkpointer=None,
+    event_service: TaskEventService | None = None,
+    task_id: str | None = None,
+    user_id: str = "anonymous",
+    conversation_id: str | None = None,
 ) -> TravelPlanDraft:
     """供 API、测试和后台任务调用的结构化规划入口。"""
-    graph = create_supervisor_graph(registry)
+    task_id = task_id or uuid4().hex
+    graph = create_supervisor_graph(registry, checkpointer=checkpointer, event_service=event_service)
     result = await graph.ainvoke(
         {
             "requirement": requirement.model_dump(mode="json"),
             "worker_results": [],
             "warnings": [],
-        }
+            "task_id": task_id,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+        },
+        config={"configurable": {"thread_id": task_id}},
     )
     return TravelPlanDraft.model_validate(result["draft"])
 
