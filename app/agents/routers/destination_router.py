@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from app.config import settings
 from app.utils.logger import app_logger
+from app.agents.workers.local_knowledge import load_destination_evidence
 
 
 class Classification(TypedDict):
@@ -87,20 +88,11 @@ def explore_agent_node(state: dict) -> dict:
     destination = state["destination"]
     app_logger.info(f"探索 Agent 执行: {query}")
 
-    # TODO: 第六章完善后，实际调用 RAG 检索
-    result = f"""## {destination} 景点攻略
-
-### 必游景点
-1. {destination}核心景区（详细攻略待 RAG 接入）
-2. 历史文化景点
-3. 自然风景区
-
-### 推荐行程
-Day 1: 主要景区
-Day 2: 文化探索
-
-（实际会从知识库检索详细攻略）
-"""
+    evidence = load_destination_evidence(destination, query)
+    if evidence:
+        result = "\n\n".join(f"来源：{item.source}\n{item.content[:1000]}" for item in evidence)
+    else:
+        result = f"{destination} 暂无可验证的静态攻略资料，需要启用搜索数据源后再研究。"
     return {"agent_results": [{"agent_name": "explore", "result": result}]}
 
 
@@ -109,14 +101,7 @@ def weather_agent_node(state: dict) -> dict:
     destination = state["destination"]
     app_logger.info(f"天气 Agent 执行: {destination}")
 
-    # TODO: 第七章接入高德天气 MCP 后实现
-    result = f"""## {destination} 天气信息
-
-今日：晴，温度适宜
-未来三天：以晴为主，适合出行
-
-（实际会调用高德天气 API）
-"""
+    result = f"{destination} 当前没有经过验证的实时天气结果，请启用天气 MCP/API 后重新查询。"
     return {"agent_results": [{"agent_name": "weather", "result": result}]}
 
 

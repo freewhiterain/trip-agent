@@ -7,6 +7,7 @@ from operator import add
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from app.utils.logger import app_logger
+from app.agents.workers.local_knowledge import load_destination_evidence
 
 
 class FoodRouterState(TypedDict):
@@ -31,8 +32,12 @@ def food_query_node(state: dict) -> dict:
     food_type = state["food_type"]
     app_logger.info(f"查询餐饮: {destination} - {food_type}")
 
-    # TODO: 接入 RAG 检索餐饮文档
-    return {"query_results": [{"food_type": food_type, "result": f"{destination} {food_type} 推荐（待 RAG 接入）"}]}
+    evidence = load_destination_evidence(destination, f"food {food_type}")
+    if not evidence:
+        result = f"{destination} 暂无可验证的 {food_type} 餐饮资料，未生成具体商家或价格。"
+    else:
+        result = "\n".join(f"来源：{item.source}\n{item.content[:500]}" for item in evidence)
+    return {"query_results": [{"food_type": food_type, "result": result}]}
 
 
 def synthesize_food(state: FoodRouterState) -> dict:
