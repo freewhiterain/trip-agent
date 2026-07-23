@@ -1,0 +1,167 @@
+# Phase 2 Task 2 working-tree review package
+
+## Tracked diff
+diff --git a/app/agents/workers/local_knowledge.py b/app/agents/workers/local_knowledge.py
+index e42f3fd..f37ffc8 100644
+--- a/app/agents/workers/local_knowledge.py
++++ b/app/agents/workers/local_knowledge.py
+@@ -1,37 +1,70 @@
+ """本地静态知识的 Hybrid RAG 查询入口。"""
+ 
+ from functools import lru_cache
+ 
++from langchain_core.documents import Document
++
+ from app.rag.document_loader import DocumentManager
+ from app.rag.evidence import evidence_from_document
+ from app.rag.reranker import RelevanceReranker
+ from app.rag.retriever import HybridRetriever
+ from app.rag.text_splitter import ParentDocumentSplitter
+-from app.schemas.planning import Evidence
++from app.schemas.planning import Evidence, TaskType
+ 
+ 
+ class LocalKnowledgeService:
+-    def __init__(self):
+-        documents = DocumentManager().load_all_documents()
++    def __init__(self, documents: list[Document] | None = None):
++        self.documents = documents if documents is not None else DocumentManager().load_all_documents()
++        self.retriever = self._build_retriever(self.documents)
++
++    @staticmethod
++    def _build_retriever(documents: list[Document]) -> HybridRetriever | None:
+         parents, children = ParentDocumentSplitter().split_documents(documents)
+-        self.retriever = HybridRetriever(
++        if not children:
++            return None
++        return HybridRetriever(
+             vectorstore=None,
+             documents=children,
+             parent_documents=parents,
+             reranker=RelevanceReranker(),
+             k=4,
+         )
+ 
+     def search(self, query: str) -> list[Evidence]:
++        if self.retriever is None:
++            return []
+         return [evidence_from_document(document) for document in self.retriever.retrieve(query)]
+ 
++    def search_destination(
++        self,
++        destination: str,
++        category: TaskType,
++        query: str,
++    ) -> list[Evidence]:
++        normalized_destination = destination.strip().casefold()
++        normalized_category = category.strip().casefold()
++        documents = [
++            document
++            for document in self.documents
++            if str(document.metadata.get("city", "")).strip().casefold() == normalized_destination
++            and str(document.metadata.get("category", "")).strip().casefold() == normalized_category
++        ]
++        if not documents:
++            return []
++
++        retrieval_query = f"{destination} {category} {query}"
++        retriever = self._build_retriever(documents)
++        if retriever is None:
++            return []
++        return [evidence_from_document(document) for document in retriever.retrieve(retrieval_query)]
++
+ 
+ @lru_cache(maxsize=1)
+ def get_local_knowledge_service() -> LocalKnowledgeService:
+     return LocalKnowledgeService()
+ 
+ 
+ def load_destination_evidence(destination: str, topic: str) -> list[Evidence]:
+     items = get_local_knowledge_service().search(f"{destination} {topic}")
+     return [
+         item
+
+## New test file
+diff --git a/tests/test_phase2_rag_workers.py b/tests/test_phase2_rag_workers.py
+new file mode 100644
+index 0000000..76b1181
+--- /dev/null
++++ b/tests/test_phase2_rag_workers.py
+@@ -0,0 +1,77 @@
++from langchain_core.documents import Document
++
++from app.agents.workers.local_knowledge import LocalKnowledgeService
++
++
++def test_search_destination_returns_evidence_only_from_requested_category():
++    service = LocalKnowledgeService(
++        documents=[
++            Document(
++                page_content="Chengdu Panda Base requires advance attraction reservations.",
++                metadata={"source": "attractions/chengdu.md", "city": " 成都 ", "category": "attractions"},
++            ),
++            Document(
++                page_content="Chengdu Metro Line 3 connects major transport hubs.",
++                metadata={"source": "transport/chengdu.md", "city": "成都", "category": "transport"},
++            ),
++        ]
++    )
++
++    evidence = service.search_destination("成都", "attractions", "Panda Base reservations")
++
++    assert [item.content for item in evidence] == ["Chengdu Panda Base requires advance attraction reservations."]
++    assert evidence[0].source == "attractions/chengdu.md"
++    assert evidence[0].metadata["city"] == " 成都 "
++    assert evidence[0].metadata["category"] == "attractions"
++
++
++def test_search_destination_returns_empty_when_category_has_no_city_documents():
++    service = LocalKnowledgeService(
++        documents=[
++            Document(
++                page_content="Chengdu Panda Base requires advance attraction reservations.",
++                metadata={"source": "attractions/chengdu.md", "city": "成都", "category": "attractions"},
++            ),
++        ]
++    )
++
++    evidence = service.search_destination("成都", "weather", "forecast")
++
++    assert evidence == []
++
++
++def test_search_keeps_global_retrieval_compatible():
++    service = LocalKnowledgeService(
++        documents=[
++            Document(
++                page_content="Chengdu Panda Base requires advance attraction reservations.",
++                metadata={"source": "attractions/chengdu.md", "city": "成都", "category": "attractions"},
++            ),
++            Document(
++                page_content="Chengdu Metro Line 3 connects major transport hubs.",
++                metadata={"source": "transport/chengdu.md", "city": "成都", "category": "transport"},
++            ),
++        ]
++    )
++
++    evidence = service.search("Metro Line 3")
++
++    assert evidence[0].source == "transport/chengdu.md"
++    assert evidence[0].metadata["category"] == "transport"
++
++
++def test_search_destination_returns_empty_for_an_empty_injected_corpus():
++    assert LocalKnowledgeService(documents=[]).search_destination("成都", "weather", "forecast") == []
++
++
++def test_search_destination_returns_empty_when_matching_document_has_no_content():
++    service = LocalKnowledgeService(
++        documents=[
++            Document(
++                page_content="",
++                metadata={"source": "weather/chengdu.md", "city": "成都", "category": "weather"},
++            ),
++        ]
++    )
++
++    assert service.search_destination("成都", "weather", "forecast") == []

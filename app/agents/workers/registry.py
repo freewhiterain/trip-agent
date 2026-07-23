@@ -6,10 +6,8 @@ from app.agents.workers.food import FoodWorker
 from app.agents.workers.hotel import HotelWorker
 from app.agents.workers.transport import TransportWorker
 from app.agents.workers.weather import WeatherWorker
+from app.agents.workers.local_knowledge import get_local_knowledge_service
 from app.config import settings
-from app.mcp_core.adapters.weather import AmapWeatherAdapter
-from app.mcp_core.adapters.search import TavilySearchAdapter
-from app.research.deep_research import DeepResearchService
 from app.schemas.planning import ResearchTask, TaskType, TravelRequirement, WorkerResult
 
 
@@ -42,18 +40,13 @@ class WorkerRegistry:
 def create_default_registry(enable_external: bool | None = None) -> WorkerRegistry:
     if enable_external is None:
         enable_external = settings.enable_external_tools
-    weather_adapter = AmapWeatherAdapter() if enable_external else None
-    research = (
-        DeepResearchService(TavilySearchAdapter().search)
-        if enable_external and settings.tavily_api_key
-        else None
-    )
+    knowledge = get_local_knowledge_service()
     return WorkerRegistry(
         {
-            "attractions": AttractionsWorker(research),
-            "transport": TransportWorker(),
-            "hotel": HotelWorker(),
-            "food": FoodWorker(research),
-            "weather": WeatherWorker(weather_adapter),
+            "attractions": AttractionsWorker(knowledge),
+            "transport": TransportWorker(knowledge),
+            "hotel": HotelWorker(knowledge),
+            "food": FoodWorker(knowledge),
+            "weather": WeatherWorker(knowledge),
         }
     )

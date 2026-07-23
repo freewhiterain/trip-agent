@@ -26,7 +26,7 @@ docker run -d `
   -e POSTGRES_DB=ai_travel_db `
   -e POSTGRES_USER=travel_user `
   -e POSTGRES_PASSWORD=travel123456 `
-  -p 15432:5432 `
+  -p 5432:5432 `
   --restart unless-stopped `
   pgvector/pgvector:pg17
 
@@ -66,7 +66,7 @@ python scripts/init_rag.py
 
 ```powershell
 python app/main.py
-# 访问 http://localhost:18000/docs
+# 访问 http://localhost:8000/docs
 ```
 
 ## 项目结构
@@ -98,6 +98,7 @@ LangGraph 1.0 · LangChain 1.0 · FastAPI · PostgreSQL 17 + pgvector · Redis �
 - 目的地未定时可暂停表单并请求 RAG 推荐；选择城市后恢复原表单状态。
 - 只有三项必填字段完整后才调用 Supervisor。Supervisor 调度景点、天气、交通、住宿和美食五类 Worker。
 - Worker 的实时数据源设计暂缓；未配置可用数据源时必须明确降级，不生成虚构事实。
+- **当前数据阶段（Phase 2）：仅成都 + 本地模拟 Markdown。** `data/documents/{attractions,weather,transport,accommodation,food}/chengdu.md` 是唯一的知识来源，不接入天气、地图、航班、铁路、酒店或餐厅的真实 API。Markdown 只是知识库原料，不是 Worker 的直接输出：每个 Worker 先按目的地和职责类别调用 `LocalKnowledgeService.search_destination` 做 RAG 检索，再把证据交给 `analyze_worker_evidence` 做结构化分析；没有证据支持的候选会被丢弃，不允许编造价格、班次、营业状态或天气事实。`WorkerResult.is_mock=True` 标记结果来自本地模拟资料，前端和草稿会保留该标记与证据来源。真实数据源接入和新的检索模式属于后续阶段。
 - 行程草稿常驻（`models/draft.py` + `governance/drafts.py`）：每个会话一份可增量编辑的草稿，版本递增；正式行程仍需审批落库。
 - 行程草稿常驻（`models/draft.py` + `governance/drafts.py`）：每个会话一份可增量编辑的草稿，版本递增；正式行程仍需审批落库。
 - Hybrid RAG：稳定文档/切片 ID、BM25、Dense、RRF、相关性重排和父文档回溯。

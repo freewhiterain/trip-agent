@@ -1,31 +1,27 @@
 from app.agents.workers.base import TravelWorker
-from app.schemas.planning import CandidateOption, ResearchTask, TravelRequirement, WorkerResult
+from app.agents.workers.local_knowledge import LocalKnowledgeService, get_local_knowledge_service
+from app.agents.workers.rag_analysis import analyze_worker_evidence, worker_result_from_analysis
+from app.schemas.planning import ResearchTask, TravelRequirement, WorkerResult
 
 
 class TransportWorker(TravelWorker):
+    def __init__(self, knowledge: LocalKnowledgeService | None = None, llm=None):
+        self.knowledge = knowledge
+        self.llm = llm
+
     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> WorkerResult:
         if requirement.origin is None:
             return WorkerResult(
                 task_id=task.id,
                 worker="transport",
                 status="partial",
-                summary="未提供出发地，未生成跨城交通方案。",
-                warnings=["补充出发地后可加入交通方式比较。"],
+                summary="出发地未提供，未生成跨城交通方案。",
+                warnings=["补充出发地后才能检索跨城交通证据。"],
+                is_mock=True,
             )
-        preferences = requirement.transport_preferences or ["train", "flight", "driving"]
-        options = [
-            CandidateOption(
-                name=value,
-                category="transport",
-                description="候选交通方式；班次、票价和余量必须通过实时数据源确认。",
-            )
-            for value in preferences
-        ]
-        return WorkerResult(
-            task_id=task.id,
-            worker="transport",
-            status="partial",
-            summary=f"已建立{requirement.origin}到{requirement.destination}的交通比较框架。",
-            options=options,
-            warnings=["当前未查询实时班次、票价或余量，不应据此购票。"],
+        query = f"{requirement.origin or 'origin pending'} {task.query} {' '.join(requirement.transport_preferences)}"
+        evidence = (self.knowledge or get_local_knowledge_service()).search_destination(
+            requirement.destination, "transport", query
         )
+        analysis = await analyze_worker_evidence("transport", task, requirement, evidence, llm=self.llm)
+        return worker_result_from_analysis(task, "transport", evidence, analysis)

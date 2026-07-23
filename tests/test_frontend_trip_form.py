@@ -50,3 +50,15 @@ def test_history_renders_tool_state_and_old_ask_card_is_removed():
     assert "restorePendingTool" in html
     assert "awaiting_destination" in html
     assert "renderAskCard" not in html
+
+
+def test_frontend_renders_mock_rag_worker_status_and_sources():
+    html = read_page()
+
+    assert "worker-results" in html
+    assert "本地模拟资料" in html
+    assert "worker_completed" in html or "worker_results" in html
+    assert "parsed.payload?.result" in html
+    assert "assistant_result" in html
+    assert "result.evidence" in html
+    assert "result.warnings" in html

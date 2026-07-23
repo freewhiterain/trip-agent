@@ -1,0 +1,299 @@
+# Phase 2 Task 1 working-tree review package
+
+## Tracked diff
+diff --git a/app/rag/document_loader.py b/app/rag/document_loader.py
+index 7684483..460a73f 100644
+--- a/app/rag/document_loader.py
++++ b/app/rag/document_loader.py
+@@ -2,20 +2,29 @@
+ 文档加载与预处理
+ """
+ from pathlib import Path
+ from typing import List
+ from langchain_community.document_loaders import DirectoryLoader, TextLoader
+ from langchain_core.documents import Document
+ from app.utils.logger import app_logger
+ from app.rag.identifiers import document_id
+ 
+ 
++MOCK_DOCUMENT_CATEGORIES = {
++    "attractions": "attractions",
++    "weather": "weather",
++    "transport": "transport",
++    "accommodation": "hotel",
++    "food": "food",
++}
++
++
+ class DocumentManager:
+     """文档管理器"""
+ 
+     def __init__(self, base_dir: str = None):
+         if base_dir is None:
+             project_root = Path(__file__).parent.parent.parent
+             self.base_dir = project_root / "data" / "documents"
+         else:
+             self.base_dir = Path(base_dir)
+ 
+@@ -24,21 +33,21 @@ class DocumentManager:
+         destinations_dir = self.base_dir / "destinations"
+ 
+         if not destinations_dir.exists():
+             app_logger.warning(f"目的地文档目录不存在: {destinations_dir}")
+             return []
+ 
+         loader = DirectoryLoader(
+             str(destinations_dir),
+             glob="**/*.md",
+             loader_cls=TextLoader,
+-            loader_kwargs={"autodetect_encoding": True}
++            loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
+         )
+         documents = loader.load()
+         app_logger.info(f"加载了 {len(documents)} 个目的地文档")
+ 
+         for doc in documents:
+             doc.metadata["source_type"] = "destination_guide"
+             doc.metadata["category"] = "destinations"
+             doc.metadata["document_id"] = document_id(doc)
+ 
+         return documents
+@@ -46,46 +55,78 @@ class DocumentManager:
+     def load_food_documents(self) -> List[Document]:
+         """加载美食文档"""
+         food_dir = self.base_dir / "food"
+         if not food_dir.exists():
+             return []
+ 
+         loader = DirectoryLoader(
+             str(food_dir),
+             glob="**/*.md",
+             loader_cls=TextLoader,
+-            loader_kwargs={"autodetect_encoding": True}
++            loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
+         )
+         documents = loader.load()
+         for doc in documents:
+             doc.metadata["source_type"] = "food_guide"
+             doc.metadata["category"] = "food"
++            self._apply_mock_metadata(doc)
+             doc.metadata["document_id"] = document_id(doc)
+         return documents
+ 
+     def load_accommodation_documents(self) -> List[Document]:
+         """加载住宿文档"""
+         acc_dir = self.base_dir / "accommodation"
+         if not acc_dir.exists():
+             return []
+ 
+         loader = DirectoryLoader(
+             str(acc_dir),
+             glob="**/*.md",
+             loader_cls=TextLoader,
+-            loader_kwargs={"autodetect_encoding": True}
++            loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
+         )
+         documents = loader.load()
+         for doc in documents:
+             doc.metadata["source_type"] = "accommodation_guide"
+             doc.metadata["category"] = "accommodation"
++            self._apply_mock_metadata(doc)
+             doc.metadata["document_id"] = document_id(doc)
+         return documents
+ 
++    def load_mock_documents(self) -> List[Document]:
++        """Load mock worker documents that do not have dedicated loaders."""
++        documents = []
++        for directory in ("attractions", "weather", "transport"):
++            document_dir = self.base_dir / directory
++            if not document_dir.exists():
++                continue
++
++            loader = DirectoryLoader(
++                str(document_dir),
++                glob="**/*.md",
++                loader_cls=TextLoader,
++                loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
++            )
++            for doc in loader.load():
++                self._apply_mock_metadata(doc)
++                doc.metadata["document_id"] = document_id(doc)
++                documents.append(doc)
++        return documents
++
++    @staticmethod
++    def _apply_mock_metadata(doc: Document) -> None:
++        source = Path(str(doc.metadata.get("source", "")))
++        category = MOCK_DOCUMENT_CATEGORIES.get(source.parent.name)
++        if source.name == "chengdu.md" and category:
++            doc.metadata["city"] = "成都"
++            doc.metadata["source_type"] = "mock_markdown"
++            doc.metadata["category"] = category
++
+     def load_all_documents(self) -> List[Document]:
+         """加载所有文档"""
+         all_docs = []
+         all_docs.extend(self.load_destination_documents())
+         all_docs.extend(self.load_food_documents())
+         all_docs.extend(self.load_accommodation_documents())
++        all_docs.extend(self.load_mock_documents())
+         app_logger.info(f"共加载 {len(all_docs)} 个文档")
+         return all_docs
+
+## New files
+diff --git a/tests/test_phase2_mock_documents.py b/tests/test_phase2_mock_documents.py
+new file mode 100644
+index 0000000..506b4fd
+--- /dev/null
++++ b/tests/test_phase2_mock_documents.py
+@@ -0,0 +1,55 @@
++from pathlib import Path
++
++from langchain_community.document_loaders.helpers import FileEncoding
++from langchain_community.document_loaders import text as text_loader
++
++from app.rag.document_loader import DocumentManager
++
++
++def test_chengdu_mock_documents_have_worker_metadata():
++    expected_categories = {
++        "attractions": "attractions",
++        "weather": "weather",
++        "transport": "transport",
++        "accommodation": "hotel",
++        "food": "food",
++    }
++    documents = DocumentManager().load_all_documents()
++
++    chengdu_documents = {
++        Path(str(document.metadata["source"])).parent.name: document
++        for document in documents
++        if Path(str(document.metadata["source"])).name == "chengdu.md"
++        and Path(str(document.metadata["source"])).parent.name in expected_categories
++    }
++
++    assert set(chengdu_documents) == set(expected_categories)
++    for directory, category in expected_categories.items():
++        document = chengdu_documents[directory]
++        metadata = document.metadata
++        assert "数据类型：模拟资料" in document.page_content
++        assert "适用城市：成都" in document.page_content
++        assert "最后更新：开发测试数据" in document.page_content
++        assert metadata["city"] == "成都"
++        assert metadata["source_type"] == "mock_markdown"
++        assert metadata["category"] == category
++
++
++def test_loader_falls_back_to_detected_encoding_for_unrelated_documents(tmp_path, monkeypatch):
++    source_fixture = Path(__file__).parent.parent / "data" / "documents" / "food" / "chengdu.md"
++    target_fixture = tmp_path / "food" / "chengdu.md"
++    target_fixture.parent.mkdir(parents=True)
++    target_fixture.write_bytes(source_fixture.read_bytes())
++    (tmp_path / "food" / "legacy.md").write_bytes("café".encode("latin-1"))
++    monkeypatch.setattr(
++        text_loader,
++        "detect_file_encodings",
++        lambda path: [FileEncoding("latin-1", 1.0, None)],
++    )
++
++    documents = DocumentManager(base_dir=tmp_path).load_food_documents()
++
++    assert {document.page_content for document in documents} == {
++        source_fixture.read_text(encoding="utf-8"),
++        "café",
++    }
+diff --git a/data/documents/attractions/chengdu.md b/data/documents/attractions/chengdu.md
+new file mode 100644
+index 0000000..3b54f95
+--- /dev/null
++++ b/data/documents/attractions/chengdu.md
+@@ -0,0 +1,13 @@
++# 成都景点模拟资料
++
++数据类型：模拟资料
++适用城市：成都
++最后更新：开发测试数据
++
++## 景点主题
++
++- 熊猫文化：可作为自然教育与城市文化体验的检索线索。
++- 历史街区：适合检索传统建筑、步行游览与本地生活方式主题。
++- 博物馆与遗址：适合检索巴蜀历史、文物展示与文化学习主题。
++
++本资料用于开发测试，不提供实时开放状态、票价、预约名额或营业时间。
+diff --git a/data/documents/weather/chengdu.md b/data/documents/weather/chengdu.md
+new file mode 100644
+index 0000000..50dcade
+--- /dev/null
++++ b/data/documents/weather/chengdu.md
+@@ -0,0 +1,13 @@
++# 成都天气模拟资料
++
++数据类型：模拟资料
++适用城市：成都
++最后更新：开发测试数据
++
++## 气候检索线索
++
++- 春秋通常适合围绕城市漫步、文化场馆和短途游览规划备选方案。
++- 夏季出行可将防晒、补水和室内备选活动作为行程准备项。
++- 多雨时段可将雨具和可调整的活动顺序纳入出行清单。
++
++本资料为开发测试中的长期气候提示，不是当前天气、预报或预警信息。
+diff --git a/data/documents/transport/chengdu.md b/data/documents/transport/chengdu.md
+new file mode 100644
+index 0000000..c0253ed
+--- /dev/null
++++ b/data/documents/transport/chengdu.md
+@@ -0,0 +1,13 @@
++# 成都交通模拟资料
++
++数据类型：模拟资料
++适用城市：成都
++最后更新：开发测试数据
++
++## 交通规划线索
++
++- 可按景点分布把市内活动聚合为相邻区域，减少换乘次数。
++- 抵达与离开当天可预留缓冲时间，避免将衔接安排得过于紧凑。
++- 步行、公共交通和网约出行可作为不同体力与天气条件下的备选方式。
++
++本资料仅用于开发测试，不包含实时班次、线路调整、票价或运营状态。
+diff --git a/data/documents/accommodation/chengdu.md b/data/documents/accommodation/chengdu.md
+new file mode 100644
+index 0000000..5c1eeb5
+--- /dev/null
++++ b/data/documents/accommodation/chengdu.md
+@@ -0,0 +1,13 @@
++# 成都住宿模拟资料
++
++数据类型：模拟资料
++适用城市：成都
++最后更新：开发测试数据
++
++## 住宿选择线索
++
++- 选择住宿区域时，可优先比较与计划活动区域的通勤便利度。
++- 家庭出行可关注房型空间、洗衣条件和安静程度等偏好。
++- 短住行程可把抵达交通和返程衔接纳入位置选择。
++
++本资料为开发测试资料，不提供实时房价、库存、可订状态或服务承诺。
+diff --git a/data/documents/food/chengdu.md b/data/documents/food/chengdu.md
+new file mode 100644
+index 0000000..1ac14f4
+--- /dev/null
++++ b/data/documents/food/chengdu.md
+@@ -0,0 +1,13 @@
++# 成都美食模拟资料
++
++数据类型：模拟资料
++适用城市：成都
++最后更新：开发测试数据
++
++## 美食主题
++
++- 川菜可围绕麻辣、鲜香与多样烹饪方式构建口味偏好。
++- 小吃体验可作为城市漫步中的灵活餐饮节点。
++- 点餐时可先说明辣度、食材忌口和同行者的饮食偏好。
++
++本资料用于开发测试，不提供实时菜价、排队情况、营业状态或餐位库存。

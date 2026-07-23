@@ -1,15 +1,18 @@
 from app.agents.workers.base import TravelWorker
-from app.schemas.planning import CandidateOption, ResearchTask, TravelRequirement, WorkerResult
+from app.agents.workers.local_knowledge import LocalKnowledgeService, get_local_knowledge_service
+from app.agents.workers.rag_analysis import analyze_worker_evidence, worker_result_from_analysis
+from app.schemas.planning import ResearchTask, TravelRequirement, WorkerResult
 
 
 class HotelWorker(TravelWorker):
+    def __init__(self, knowledge: LocalKnowledgeService | None = None, llm=None):
+        self.knowledge = knowledge
+        self.llm = llm
+
     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> WorkerResult:
-        preferences = requirement.accommodation_preferences or ["交通便利区域", "主要景点附近"]
-        return WorkerResult(
-            task_id=task.id,
-            worker="hotel",
-            status="partial",
-            summary=f"已建立{requirement.destination}住宿筛选条件。",
-            options=[CandidateOption(name=value, category="hotel_area", description="候选住宿方向，需实时核对价格与库存") for value in preferences],
-            warnings=["当前未查询具体酒店价格、评分或库存。"],
+        query = f"{task.query} {' '.join(requirement.accommodation_preferences)}"
+        evidence = (self.knowledge or get_local_knowledge_service()).search_destination(
+            requirement.destination, "hotel", query
         )
+        analysis = await analyze_worker_evidence("hotel", task, requirement, evidence, llm=self.llm)
+        return worker_result_from_analysis(task, "hotel", evidence, analysis)

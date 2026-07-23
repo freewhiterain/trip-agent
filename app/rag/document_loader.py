@@ -9,6 +9,15 @@ from app.utils.logger import app_logger
 from app.rag.identifiers import document_id
 
 
+MOCK_DOCUMENT_CATEGORIES = {
+    "attractions": "attractions",
+    "weather": "weather",
+    "transport": "transport",
+    "accommodation": "hotel",
+    "food": "food",
+}
+
+
 class DocumentManager:
     """文档管理器"""
 
@@ -31,7 +40,7 @@ class DocumentManager:
             str(destinations_dir),
             glob="**/*.md",
             loader_cls=TextLoader,
-            loader_kwargs={"autodetect_encoding": True}
+            loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
         )
         documents = loader.load()
         app_logger.info(f"加载了 {len(documents)} 个目的地文档")
@@ -53,12 +62,13 @@ class DocumentManager:
             str(food_dir),
             glob="**/*.md",
             loader_cls=TextLoader,
-            loader_kwargs={"autodetect_encoding": True}
+            loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
         )
         documents = loader.load()
         for doc in documents:
             doc.metadata["source_type"] = "food_guide"
             doc.metadata["category"] = "food"
+            self._apply_mock_metadata(doc)
             doc.metadata["document_id"] = document_id(doc)
         return documents
 
@@ -72,14 +82,44 @@ class DocumentManager:
             str(acc_dir),
             glob="**/*.md",
             loader_cls=TextLoader,
-            loader_kwargs={"autodetect_encoding": True}
+            loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
         )
         documents = loader.load()
         for doc in documents:
             doc.metadata["source_type"] = "accommodation_guide"
             doc.metadata["category"] = "accommodation"
+            self._apply_mock_metadata(doc)
             doc.metadata["document_id"] = document_id(doc)
         return documents
+
+    def load_mock_documents(self) -> List[Document]:
+        """Load mock worker documents that do not have dedicated loaders."""
+        documents = []
+        for directory in ("attractions", "weather", "transport"):
+            document_dir = self.base_dir / directory
+            if not document_dir.exists():
+                continue
+
+            loader = DirectoryLoader(
+                str(document_dir),
+                glob="**/*.md",
+                loader_cls=TextLoader,
+                loader_kwargs={"encoding": "utf-8", "autodetect_encoding": True}
+            )
+            for doc in loader.load():
+                self._apply_mock_metadata(doc)
+                doc.metadata["document_id"] = document_id(doc)
+                documents.append(doc)
+        return documents
+
+    @staticmethod
+    def _apply_mock_metadata(doc: Document) -> None:
+        source = Path(str(doc.metadata.get("source", "")))
+        category = MOCK_DOCUMENT_CATEGORIES.get(source.parent.name)
+        if source.name == "chengdu.md" and category:
+            doc.metadata["city"] = "成都"
+            doc.metadata["source_type"] = "mock_markdown"
+            doc.metadata["category"] = category
 
     def load_all_documents(self) -> List[Document]:
         """加载所有文档"""
@@ -87,5 +127,6 @@ class DocumentManager:
         all_docs.extend(self.load_destination_documents())
         all_docs.extend(self.load_food_documents())
         all_docs.extend(self.load_accommodation_documents())
+        all_docs.extend(self.load_mock_documents())
         app_logger.info(f"共加载 {len(all_docs)} 个文档")
         return all_docs

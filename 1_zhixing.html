@@ -932,6 +932,18 @@
       .trip-tool-button.primary { background: var(--primary); color: #fff; }
       .trip-tool-button:disabled, .trip-tool-icon:disabled { cursor: wait; opacity: 0.55; }
       .trip-tool-recommendation { margin: 0 14px 14px; color: var(--text-main); font-size: 13px; line-height: 1.55; }
+      .worker-results { margin-top: 14px; padding: 12px; border: 1px solid var(--border); background: #f8faf9; }
+      .worker-results-title { display: flex; justify-content: space-between; gap: 12px; font-weight: 700; color: var(--primary); }
+      .worker-results-label { font-size: 11px; color: var(--text-light); font-weight: 500; }
+      .worker-row { margin-top: 8px; padding: 9px 10px; border-left: 3px solid #9aa7a2; background: #fff; }
+      .worker-row.completed { border-left-color: #2f855a; }
+      .worker-row.partial { border-left-color: #c88a20; }
+      .worker-row.unavailable, .worker-row.failed { border-left-color: #b42318; }
+      .worker-row-head { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+      .worker-status { color: var(--text-light); font-size: 12px; }
+      .worker-row p { margin: 5px 0 0; font-size: 12px; line-height: 1.5; }
+      .worker-row details { margin-top: 6px; font-size: 12px; color: var(--text-light); }
+      .worker-row li { margin: 3px 0; }
 
       @media (max-width: 560px) {
         .trip-tool-header { align-items: flex-start; }
@@ -1351,6 +1363,9 @@
             latestCallId = toolCall.call_id;
             receiveTripToolCall(toolCall, `history-msg-${index}`, false);
           }
+          if (extra_info.assistant_result) {
+            appendWorkerResults(`history-msg-${index}`, extra_info.assistant_result);
+          }
         });
         messages.forEach((msg) => {
           const extra_info = msg.extra_info || {};
@@ -1621,6 +1636,40 @@
         }
       }
 
+      const workerLabels = {
+        attractions: "景点",
+        weather: "天气",
+        transport: "交通",
+        hotel: "住宿",
+        food: "美食",
+      };
+
+      function renderWorkerResults(draft) {
+        const results = Array.isArray(draft?.worker_results) ? draft.worker_results : [];
+        if (!results.length) return "";
+        const rows = results.map((result) => {
+          const sources = (result.evidence || []).map((item) =>
+            `<li>${escapeHtml(item.source)}<br>${escapeHtml(item.content || "")}</li>`
+          ).join("");
+          const warnings = (result.warnings || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+          return `<div class="worker-row ${escapeAttribute(result.status || "unavailable")}">
+            <div class="worker-row-head"><strong>${escapeHtml(workerLabels[result.worker] || result.worker || "Worker")}</strong><span class="worker-status">${escapeHtml(result.status || "unavailable")}</span></div>
+            <p>${escapeHtml(result.summary || "")}</p>
+            ${sources ? `<details><summary>证据来源（${result.evidence.length}）</summary><ul>${sources}</ul></details>` : ""}
+            ${warnings ? `<details><summary>提示（${result.warnings.length}）</summary><ul>${warnings}</ul></details>` : ""}
+          </div>`;
+        }).join("");
+        return `<section class="worker-results"><div class="worker-results-title"><span>Worker 研究结果</span><span class="worker-results-label">本地模拟资料</span></div>${rows}</section>`;
+      }
+
+      function appendWorkerResults(messageId, draft) {
+        const message = document.getElementById(messageId);
+        if (!message) return;
+        const content = message.querySelector(".message-content");
+        if (!content || content.querySelector(".worker-results")) return;
+        content.insertAdjacentHTML("beforeend", renderWorkerResults(draft));
+      }
+
       async function submitTripToolResult(callId, status) {
         const tool = state.tripTools[callId];
         if (!tool || tool.submitting) return;
@@ -1642,7 +1691,7 @@
         renderTripTool(callId);
         let recommendationText = tool.recommendation || "";
         let finalText = "";
-        let finalMessageId = null;
+        let finalMessageId = isRecommendation ? null : addMessage("assistant", "");
         try {
           const body = isRecommendation
             ? { tool: tool.tool, status: "recommend_destination", partial_values }
@@ -1669,7 +1718,6 @@
                 renderTripTool(callId);
               } else {
                 finalText += parsed.content;
-                if (!finalMessageId) finalMessageId = addMessage("assistant", "");
                 updateMessage(finalMessageId, finalText);
               }
             } else if (parsed.type === "tool_result") {
@@ -1677,6 +1725,7 @@
             } else if (parsed.type === "result" && !isRecommendation) {
               tool.status = "completed";
               renderTripTool(callId);
+              appendWorkerResults(finalMessageId, parsed.payload?.result || parsed.result);
             } else if (parsed.type === "error") {
               throw new Error(parsed.message || "Tool result failed");
             }
@@ -1781,6 +1830,8 @@
                 updateMessage(msgId, fullText);
               } else if (parsed.type === "tool_call") {
                 receiveTripToolCall(parsed.payload || parsed, msgId);
+              } else if (parsed.type === "result") {
+                appendWorkerResults(msgId, parsed.payload?.result || parsed.result);
               } else if (parsed.type === "error") {
                 fullText += `\n\n> ${parsed.message || "旅行规划失败，请稍后重试。"}`;
                 updateMessage(msgId, fullText);

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 TaskType = Literal["attractions", "transport", "hotel", "food", "weather"]
-WorkerStatus = Literal["completed", "partial", "failed"]
+WorkerStatus = Literal["completed", "partial", "unavailable", "failed"]
 
 
 class TravelRequirement(BaseModel):
@@ -117,6 +117,7 @@ class WorkerResult(BaseModel):
     options: list[CandidateOption] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    is_mock: bool = False
 
 
 class TimeSlot(BaseModel):

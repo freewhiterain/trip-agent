@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # ============== 应用基础配置 ==============
     app_env: str = Field(default="development", alias="APP_ENV")
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
-    app_port: int = Field(default=18000, alias="APP_PORT")
+    app_port: int = Field(default=8000, alias="APP_PORT")
     debug: bool = Field(default=False, alias="DEBUG")
     jwt_secret_key: str = Field(
         default="development-only-change-me",
