@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+from typing import Awaitable, Callable
 
 from app.agents.workers.graph_knowledge import GraphKnowledgeService
 from app.config import settings
+from app.models.base import init_db
 from app.rag.document_loader import DocumentManager
 from app.rag.graph_extraction import (
     ExtractedEntity,
@@ -26,7 +27,9 @@ async def build_graph(
     document_manager: DocumentManager | None = None,
     service_factory: Callable[[], GraphKnowledgeService] = GraphKnowledgeService,
     llm_factory: Callable[[], object] | None = None,
+    ensure_schema: Callable[[], Awaitable[None]] = init_db,
 ) -> None:
+    await ensure_schema()
     document_manager = document_manager or DocumentManager()
     documents = [
         document

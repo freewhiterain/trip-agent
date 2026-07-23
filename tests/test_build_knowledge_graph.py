@@ -25,6 +25,10 @@ class _StubDocumentManager:
         return self._documents
 
 
+async def _noop_ensure_schema():
+    return None
+
+
 @pytest.mark.asyncio
 async def test_build_graph_writes_rule_extracted_relations_without_llm(monkeypatch):
     monkeypatch.setattr("scripts.build_knowledge_graph.settings.dashscope_api_key", "")
@@ -33,7 +37,11 @@ async def test_build_graph_writes_rule_extracted_relations_without_llm(monkeypat
     ]
     service = _RecordingGraphService()
 
-    await build_graph(document_manager=_StubDocumentManager(documents), service_factory=lambda: service)
+    await build_graph(
+        document_manager=_StubDocumentManager(documents),
+        service_factory=lambda: service,
+        ensure_schema=_noop_ensure_schema,
+    )
 
     assert len(service.calls) == 1
     entities, relations = service.calls[0]
@@ -53,6 +61,7 @@ async def test_build_graph_skips_llm_extraction_when_not_configured(monkeypatch)
         document_manager=_StubDocumentManager(documents),
         service_factory=lambda: service,
         llm_factory=lambda: llm_factory_calls.append(True),
+        ensure_schema=_noop_ensure_schema,
     )
 
     assert llm_factory_calls == []  # llm_factory must not be invoked when no key is configured
@@ -72,6 +81,7 @@ async def test_build_graph_continues_when_llm_extraction_fails(monkeypatch):
         document_manager=_StubDocumentManager(documents),
         service_factory=lambda: service,
         llm_factory=lambda: _ExplodingLlm(),
+        ensure_schema=_noop_ensure_schema,
     )
 
     assert len(service.calls) == 1
@@ -82,23 +92,11 @@ async def test_build_graph_continues_when_llm_extraction_fails(monkeypatch):
 import os
 
 from app.agents.workers.attractions import AttractionsWorker
-from app.agents.workers.graph_knowledge import GraphKnowledgeService
 from app.agents.workers.hotel import HotelWorker
 from app.agents.workers.local_knowledge import LocalKnowledgeService
-from app.models.base import async_session_maker, init_db
-from app.models.knowledge_graph import KnowledgeEntity, KnowledgeRelation
+from app.models.base import init_db
 from app.schemas.planning import ResearchTask, TravelRequirement
 from datetime import date
-from sqlalchemy import select
-
-
-pytestmark_e2e = [
-    pytest.mark.external,
-    pytest.mark.skipif(
-        os.getenv("RUN_POSTGRES_TESTS") != "1",
-        reason="requires RUN_POSTGRES_TESTS=1 and a reachable PostgreSQL database",
-    ),
-]
 
 
 @pytest.mark.external

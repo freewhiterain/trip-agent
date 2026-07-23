@@ -32,7 +32,7 @@
 - 文档入库阶段（离线脚本，不在请求路径上）的规则抽取，以及在已配置 LLM 时
   的可选补充抽取。
 - 新增 `GraphKnowledgeService.search_related_entities(destination, category,
-  query) -> list[Evidence]`，按城市+类别做 1-2 跳查询。
+  query) -> list[Evidence]`，按城市+类别做 1 跳查询。
 - `attractions`、`hotel` 两个 Worker 先接入图证据（这两类的"附近/同片区"
   关系需求最直接）。
 - 为验证链路，给现有五篇成都模拟资料补充少量具名实体（如具体景点名称）和
@@ -96,10 +96,11 @@ Alembic，继续通过 `Base.metadata.create_all`（与现有表一致）。
 ## 检索集成
 
 - `GraphKnowledgeService.search_related_entities(destination, category,
-  query)`：按城市+类别过滤实体，查询命中实体的直接关系（1 跳）以及关系另一
-  端实体的直接关系（2 跳，仅当另一端是 `area` 类实体时展开，避免跳数爆炸），
-  把命中的实体和关系拼成简短文本，转成 `Evidence`
-  （`metadata.source_type="graph_relation"`，与 `mock_markdown` 区分）。
+  query)`：按城市+类别过滤实体，查询命中实体的直接关系（1 跳），把命中的
+  实体和关系拼成简短文本，转成 `Evidence`
+  （`metadata.source_type="graph_relation"`，与 `mock_markdown` 区分）。当前
+  实现仅做 1 跳查询；关系另一端实体（尤其是 `area` 类）的二次展开（2 跳）
+  留待后续迭代按需评估，遵循本设计"轻量先行、按需扩展"的整体思路。
 - `AttractionsWorker`、`HotelWorker` 在现有 `search_destination` 调用之后，
   追加调用 `search_related_entities`，两组 `Evidence` 合并后一起交给
   `analyze_worker_evidence`；该函数现有的"无证据不产出候选"约束不变，图

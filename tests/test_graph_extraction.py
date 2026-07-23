@@ -107,7 +107,8 @@ def test_resolve_relations_links_near_when_target_is_known():
 
     assert extra_entities == []
     assert len(resolved) == 1
-    assert resolved[0] == resolved[0]
+    assert resolved[0].from_category == "hotel"
+    assert resolved[0].to_category == "attractions"
     assert resolved[0].from_name == "青羊区住宿片区"
     assert resolved[0].to_name == "宽窄巷子"
     assert resolved[0].relation_type == "near"

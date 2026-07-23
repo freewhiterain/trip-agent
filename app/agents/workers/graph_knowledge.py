@@ -97,33 +97,34 @@ class GraphKnowledgeService:
                 targets = (
                     await session.execute(select(KnowledgeEntity).where(KnowledgeEntity.id.in_(target_ids)))
                 ).scalars().all()
+
+                entities_by_id = {entity.id: entity for entity in entities}
+                targets_by_id = {entity.id: entity for entity in targets}
+                evidence: list[Evidence] = []
+                for relation in relations:
+                    source_entity = entities_by_id.get(relation.from_entity_id)
+                    target_entity = targets_by_id.get(relation.to_entity_id)
+                    if source_entity is None or target_entity is None:
+                        continue
+                    label = _RELATION_LABELS.get(relation.relation_type, relation.relation_type)
+                    evidence.append(
+                        Evidence(
+                            content=f"{source_entity.name} {label} {target_entity.name}",
+                            source=relation.source_document,
+                            confidence=relation.confidence,
+                            metadata={
+                                "source_type": "graph_relation",
+                                "category": normalized_category,
+                                "relation_type": relation.relation_type,
+                                "from_entity": source_entity.name,
+                                "to_entity": target_entity.name,
+                            },
+                        )
+                    )
         except Exception as exc:
             app_logger.warning(f"知识图谱查询失败，返回空结果：{type(exc).__name__}: {exc}")
             return []
 
-        entities_by_id = {entity.id: entity for entity in entities}
-        targets_by_id = {entity.id: entity for entity in targets}
-        evidence: list[Evidence] = []
-        for relation in relations:
-            source_entity = entities_by_id.get(relation.from_entity_id)
-            target_entity = targets_by_id.get(relation.to_entity_id)
-            if source_entity is None or target_entity is None:
-                continue
-            label = _RELATION_LABELS.get(relation.relation_type, relation.relation_type)
-            evidence.append(
-                Evidence(
-                    content=f"{source_entity.name} {label} {target_entity.name}",
-                    source=relation.source_document,
-                    confidence=relation.confidence,
-                    metadata={
-                        "source_type": "graph_relation",
-                        "category": normalized_category,
-                        "relation_type": relation.relation_type,
-                        "from_entity": source_entity.name,
-                        "to_entity": target_entity.name,
-                    },
-                )
-            )
         return evidence
 
 
