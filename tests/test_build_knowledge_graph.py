@@ -77,3 +77,48 @@ async def test_build_graph_continues_when_llm_extraction_fails(monkeypatch):
     assert len(service.calls) == 1
     entities, relations = service.calls[0]
     assert len(relations) == 1  # rule-extracted relation still written despite LLM failure
+
+
+import os
+
+from app.agents.workers.attractions import AttractionsWorker
+from app.agents.workers.graph_knowledge import GraphKnowledgeService
+from app.agents.workers.hotel import HotelWorker
+from app.agents.workers.local_knowledge import LocalKnowledgeService
+from app.models.base import async_session_maker, init_db
+from app.models.knowledge_graph import KnowledgeEntity, KnowledgeRelation
+from app.schemas.planning import ResearchTask, TravelRequirement
+from datetime import date
+from sqlalchemy import select
+
+
+pytestmark_e2e = [
+    pytest.mark.external,
+    pytest.mark.skipif(
+        os.getenv("RUN_POSTGRES_TESTS") != "1",
+        reason="requires RUN_POSTGRES_TESTS=1 and a reachable PostgreSQL database",
+    ),
+]
+
+
+@pytest.mark.external
+@pytest.mark.skipif(
+    os.getenv("RUN_POSTGRES_TESTS") != "1",
+    reason="requires RUN_POSTGRES_TESTS=1 and a reachable PostgreSQL database",
+)
+@pytest.mark.asyncio
+async def test_real_chengdu_fixtures_produce_queryable_graph_evidence():
+    await init_db()
+    await build_graph()
+
+    requirement = TravelRequirement(destination="成都", departure_date=date(2026, 9, 1), days=3)
+    attractions_result = await AttractionsWorker(knowledge=LocalKnowledgeService()).run(
+        ResearchTask(task_type="attractions", query="成都 attractions"), requirement
+    )
+    hotel_result = await HotelWorker(knowledge=LocalKnowledgeService()).run(
+        ResearchTask(task_type="hotel", query="成都 hotel"), requirement
+    )
+
+    assert any(item.metadata.get("source_type") == "graph_relation" for item in attractions_result.evidence)
+    assert any(item.metadata.get("source_type") == "graph_relation" for item in hotel_result.evidence)
+    assert any("临近 宽窄巷子" in item.content for item in hotel_result.evidence)
