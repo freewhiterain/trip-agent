@@ -1,69 +1,24 @@
 """阶段 0：规划边界和认证安全回归测试。"""
 
-from types import SimpleNamespace
+from datetime import date
 
 import pytest
 
-from app.agents.handoffs.step_config import get_step_config
+from app.agents.supervisor import run_travel_planning
 from app.config import Settings, settings
-from app.tools.state_transition import (
-    confirm_plan_draft_tool,
-    summarize_budget_tool,
-)
+from app.schemas.planning import TravelRequirement
 from app.utils.security import create_access_token, decode_access_token
 
 
 @pytest.mark.asyncio
-async def test_legacy_agent_exposes_no_transaction_tools():
-    config = await get_step_config()
-    banned_fragments = {
-        "order",
-        "book",
-        "payment",
-        "refund",
-        "订单",
-        "支付",
-        "预订",
-        "退款",
-    }
-
-    assert "order_generation" not in config
-    for step in config.values():
-        tool_names = {tool.name.lower() for tool in step["tools"]}
-        assert not any(
-            fragment in tool_name
-            for tool_name in tool_names
-            for fragment in banned_fragments
-        )
-
-
-def test_budget_transitions_to_plan_review_without_order():
-    runtime = SimpleNamespace(
-        tool_call_id="budget-test",
-        state={
-            "user_requirement": {
-                "adult_count": 2,
-                "children_count": 0,
-                "travel_days": 3,
-            }
-        },
+async def test_planning_draft_exposes_no_transaction_data():
+    draft = await run_travel_planning(
+        TravelRequirement(origin="上海", destination="成都", departure_date=date(2026, 8, 1), days=2)
     )
 
-    command = summarize_budget_tool.func(runtime=runtime)
-
-    assert command.update["current_step"] == "plan_review"
-    assert command.update["plan_status"] == "draft"
-    assert "order_id" not in command.update
-
-
-def test_confirming_plan_has_no_external_side_effect_data():
-    runtime = SimpleNamespace(tool_call_id="confirm-test", state={})
-
-    command = confirm_plan_draft_tool.func(runtime=runtime)
-
-    assert command.update["current_step"] == "planning_complete"
-    assert command.update["plan_status"] == "confirmed"
-    serialized = str(command.update)
+    serialized = draft.model_dump_json()
+    assert "订单" not in serialized
+    assert "支付" not in serialized
     assert "ORDER-" not in serialized
     assert "pay.example.com" not in serialized
 

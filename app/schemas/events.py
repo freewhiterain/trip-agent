@@ -7,7 +7,19 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 
-SSEType = Literal["task", "plan", "worker", "evidence", "approval", "token", "result", "error", "done"]
+SSEType = Literal[
+    "task",
+    "plan",
+    "worker",
+    "evidence",
+    "approval",
+    "token",
+    "result",
+    "error",
+    "done",
+    "tool_call",
+    "tool_result",
+]
 
 
 class SSEEvent(BaseModel):
@@ -25,4 +37,14 @@ class SSEEvent(BaseModel):
             result["content"] = self.payload.get("content", "")
         if self.type == "error":
             result["message"] = self.payload.get("message", "未知错误")
+        if self.type == "tool_call":
+            payload = result.get("payload", {})
+            for field in ("tool", "call_id", "arguments"):
+                if field in payload:
+                    result[field] = payload[field]
+        if self.type == "tool_result":
+            payload = result.get("payload", {})
+            for field in ("tool", "status", "result", "partial_values"):
+                if field in payload:
+                    result[field] = payload[field]
         return result

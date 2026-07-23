@@ -4,6 +4,14 @@ from app.schemas.planning import CandidateOption, ResearchTask, TravelRequiremen
 
 class TransportWorker(TravelWorker):
     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> WorkerResult:
+        if requirement.origin is None:
+            return WorkerResult(
+                task_id=task.id,
+                worker="transport",
+                status="partial",
+                summary="未提供出发地，未生成跨城交通方案。",
+                warnings=["补充出发地后可加入交通方式比较。"],
+            )
         preferences = requirement.transport_preferences or ["train", "flight", "driving"]
         options = [
             CandidateOption(

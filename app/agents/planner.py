@@ -4,19 +4,30 @@ from app.schemas.planning import ResearchTask, TravelRequirement
 
 
 def create_research_plan(requirement: TravelRequirement) -> list[ResearchTask]:
-    """为已确定目的地的需求生成五个可并行研究任务。"""
+    """生成带依赖关系的研究任务 DAG。
+
+    第一组（并行）：目的地、天气——互不依赖；
+    第二组（并行）：交通、住宿、美食——依赖目的地研究结论。
+    """
     destination = requirement.destination
     common_criteria = ["返回结构化候选项", "事实结论附带 Evidence", "缺失实时数据时明确降级"]
 
-    definitions = [
-        (
-            "destination",
-            f"研究{destination}的景点、文化和适合的游览区域",
-            ["hybrid_rag", "search"],
-        ),
+    attractions_task = ResearchTask(
+        task_type="attractions",
+        query=f"研究{destination}的景点、文化和适合的游览区域",
+        required_tools=["hybrid_rag", "search"],
+        completion_criteria=common_criteria,
+    )
+    weather_task = ResearchTask(
+        task_type="weather",
+        query=f"查询{destination}在{requirement.departure_date}前后的天气与出行条件",
+        required_tools=["weather_api"],
+        completion_criteria=common_criteria,
+    )
+    dependent_definitions = [
         (
             "transport",
-            f"比较{requirement.origin}到{destination}在{requirement.departure_date}的交通方式",
+            f"比较{requirement.origin or '出发地待定'}到{destination}在{requirement.departure_date}的交通方式",
             ["transport_api", "map"],
         ),
         (
@@ -29,21 +40,21 @@ def create_research_plan(requirement: TravelRequirement) -> list[ResearchTask]:
             f"研究{destination}本地美食与用户饮食偏好匹配情况",
             ["hybrid_rag", "search"],
         ),
-        (
-            "weather",
-            f"查询{destination}在{requirement.departure_date}前后的天气与出行条件",
-            ["weather_api"],
-        ),
     ]
 
     return [
-        ResearchTask(
-            task_type=task_type,
-            query=query,
-            required_tools=tools,
-            completion_criteria=common_criteria,
-        )
-        for task_type, query, tools in definitions
+        attractions_task,
+        weather_task,
+        *(
+            ResearchTask(
+                task_type=task_type,
+                query=query,
+                required_tools=tools,
+                completion_criteria=common_criteria,
+                dependencies=[attractions_task.id],
+            )
+            for task_type, query, tools in dependent_definitions
+        ),
     ]
 
 

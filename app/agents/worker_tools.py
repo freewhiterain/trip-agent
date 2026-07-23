@@ -9,7 +9,7 @@ from app.schemas.planning import ResearchTask, TaskType, TravelRequirement
 
 
 WORKER_TOOL_NAMES: dict[TaskType, str] = {
-    "destination": "destination_research_agent",
+    "attractions": "attractions_research_agent",
     "transport": "transport_research_agent",
     "hotel": "hotel_research_agent",
     "food": "food_research_agent",

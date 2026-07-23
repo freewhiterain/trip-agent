@@ -61,3 +61,10 @@ tests/*.md
 
 # Trae IDE 生成的 specs 文件
 .trae/
+
+# Claude Code 本地配置（不上传）
+.claude/
+
+# 本地测试工具和执行记录
+.playwright-browsers/
+.superpowers/

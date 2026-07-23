@@ -4,7 +4,7 @@ from app.schemas.planning import CandidateOption, ResearchTask, TravelRequiremen
 from app.research.deep_research import DeepResearchService
 
 
-class DestinationWorker(TravelWorker):
+class AttractionsWorker(TravelWorker):
     def __init__(self, research: DeepResearchService | None = None):
         self.research = research
 
@@ -19,17 +19,17 @@ class DestinationWorker(TravelWorker):
         if not evidence:
             return WorkerResult(
                 task_id=task.id,
-                worker="destination",
+                worker="attractions",
                 status="partial",
                 summary=f"尚无{requirement.destination}的本地知识文档。",
                 warnings=["需要在实时搜索或知识库补充后生成事实性景点推荐。"],
             )
         return WorkerResult(
             task_id=task.id,
-            worker="destination",
+            worker="attractions",
             status="completed",
             summary=f"已找到{requirement.destination}的本地目的地资料。",
-            options=[CandidateOption(name=requirement.destination, category="destination", description="已获得可追溯研究资料")],
+            options=[CandidateOption(name=requirement.destination, category="attractions", description="已获得可追溯研究资料")],
             evidence=evidence,
             warnings=warnings,
         )

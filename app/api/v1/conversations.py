@@ -7,14 +7,20 @@ from sqlalchemy import select, desc
 from app.models.base import get_db
 from app.models.user import User
 from app.models.conversation import Conversation
+from app.models.message import Message
 from app.schemas.conversation import ConversationCreate, ConversationUpdate, ConversationResponse
+from app.schemas.message import MessageResponse
 from app.api.dependencies import get_current_user
 
 
 router = APIRouter(prefix="/conversations", tags=["会话管理"])
 
 
-@router.post("", response_model=ConversationResponse)
+class ConversationCreateResponse(ConversationResponse):
+    initial_message: MessageResponse
+
+
+@router.post("", response_model=ConversationCreateResponse)
 async def create_conversation(
     data: ConversationCreate,
     user: User = Depends(get_current_user),
@@ -29,10 +35,24 @@ async def create_conversation(
     )
 
     db.add(conversation)
+    await db.flush()
+
+    initial_message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="需要我帮你规划一下旅行吗？",
+        extra_info={"kind": "conversation_offer"},
+    )
+    db.add(initial_message)
+    await db.flush()
     await db.commit()
     await db.refresh(conversation)
+    await db.refresh(initial_message)
 
-    return ConversationResponse.from_orm(conversation)
+    return ConversationCreateResponse(
+        **ConversationResponse.model_validate(conversation).model_dump(),
+        initial_message=MessageResponse.model_validate(initial_message),
+    )
 
 
 @router.get("", response_model=list[ConversationResponse])
@@ -51,7 +71,7 @@ async def list_conversations(
 
     conversations = result.scalars().all()
 
-    return [ConversationResponse.from_orm(c) for c in conversations]
+    return [ConversationResponse.model_validate(c) for c in conversations]
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)
@@ -76,7 +96,7 @@ async def get_conversation(
             detail="会话不存在"
         )
 
-    return ConversationResponse.from_orm(conversation)
+    return ConversationResponse.model_validate(conversation)
 
 
 @router.patch("/{conversation_id}", response_model=ConversationResponse)
@@ -111,7 +131,7 @@ async def update_conversation(
     await db.commit()
     await db.refresh(conversation)
 
-    return ConversationResponse.from_orm(conversation)
+    return ConversationResponse.model_validate(conversation)
 
 
 @router.delete("/{conversation_id}")

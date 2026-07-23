@@ -9,7 +9,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-TaskType = Literal["destination", "transport", "hotel", "food", "weather"]
+TaskType = Literal["attractions", "transport", "hotel", "food", "weather"]
 WorkerStatus = Literal["completed", "partial", "failed"]
 
 
@@ -18,10 +18,11 @@ class TravelRequirement(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    origin: str = Field(min_length=1, max_length=80)
+    origin: str | None = Field(default=None, min_length=1, max_length=80)
     destination: str = Field(min_length=1, max_length=80)
     departure_date: date
     days: int = Field(ge=1, le=30)
+    assumptions: list[str] = Field(default_factory=list)
     adults: int = Field(default=1, ge=1, le=30)
     children: int = Field(default=0, ge=0, le=20)
     budget: float | None = Field(default=None, gt=0)
@@ -33,7 +34,7 @@ class TravelRequirement(BaseModel):
 
     @model_validator(mode="after")
     def destination_must_differ_from_origin(self):
-        if self.origin == self.destination:
+        if self.origin is not None and self.origin == self.destination:
             raise ValueError("出发地和目的地不能相同")
         return self
 
@@ -60,6 +61,15 @@ class TravelRequirementDraft(BaseModel):
         if missing:
             raise ValueError(f"旅行需求缺少：{', '.join(missing)}")
         return TravelRequirement(**self.model_dump())
+
+class TripDraftRecord(BaseModel):
+    """会话级常驻行程草稿的持久化载体。"""
+
+    user_id: str
+    conversation_id: str
+    version: int = 1
+    requirement: dict[str, Any] = Field(default_factory=dict)
+    content: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResearchTask(BaseModel):

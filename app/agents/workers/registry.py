@@ -1,7 +1,7 @@
 """Worker 注册表与最小权限调度。"""
 
 from app.agents.workers.base import TravelWorker
-from app.agents.workers.destination import DestinationWorker
+from app.agents.workers.attractions import AttractionsWorker
 from app.agents.workers.food import FoodWorker
 from app.agents.workers.hotel import HotelWorker
 from app.agents.workers.transport import TransportWorker
@@ -50,7 +50,7 @@ def create_default_registry(enable_external: bool | None = None) -> WorkerRegist
     )
     return WorkerRegistry(
         {
-            "destination": DestinationWorker(research),
+            "attractions": AttractionsWorker(research),
             "transport": TransportWorker(),
             "hotel": HotelWorker(),
             "food": FoodWorker(research),

@@ -10,13 +10,13 @@ from app.schemas.planning import ResearchTask, TravelRequirement
 
 def make_requirement(**overrides):
     data = {
-        "origin": "上海",
-        "destination": "成都",
+        "origin": "Shanghai",
+        "destination": "Chengdu",
         "departure_date": date(2026, 8, 1),
         "days": 5,
         "adults": 2,
         "budget": 6000,
-        "styles": ["文化", "美食"],
+        "styles": ["culture", "food"],
     }
     data.update(overrides)
     return TravelRequirement(**data)
@@ -24,28 +24,33 @@ def make_requirement(**overrides):
 
 def test_requirement_rejects_invalid_trip():
     with pytest.raises(ValidationError):
-        make_requirement(destination="上海")
+        make_requirement(destination="Shanghai")
     with pytest.raises(ValidationError):
         make_requirement(days=0)
 
 
-def test_planner_creates_five_independent_worker_tasks():
+def test_planner_creates_dag_with_two_parallel_groups():
     tasks = create_research_plan(make_requirement())
 
     assert {task.task_type for task in tasks} == {
-        "destination",
+        "attractions",
         "transport",
         "hotel",
         "food",
         "weather",
     }
     assert len({task.id for task in tasks}) == 5
-    assert len(parallel_groups(tasks)) == 1
+
+    groups = parallel_groups(tasks)
+    assert [{task.task_type for task in group} for group in groups] == [
+        {"attractions", "weather"},
+        {"transport", "hotel", "food"},
+    ]
 
 
 def test_parallel_groups_respects_dependencies():
-    first = ResearchTask(task_type="destination", query="目的地")
-    second = ResearchTask(task_type="hotel", query="住宿", dependencies=[first.id])
+    first = ResearchTask(task_type="attractions", query="attractions")
+    second = ResearchTask(task_type="hotel", query="hotel", dependencies=[first.id])
 
     groups = parallel_groups([second, first])
 
@@ -53,10 +58,10 @@ def test_parallel_groups_respects_dependencies():
 
 
 def test_parallel_groups_rejects_cycles():
-    first = ResearchTask(id="a", task_type="destination", query="a", dependencies=["b"])
+    first = ResearchTask(id="a", task_type="attractions", query="a", dependencies=["b"])
     second = ResearchTask(id="b", task_type="hotel", query="b", dependencies=["a"])
 
-    with pytest.raises(ValueError, match="循环依赖"):
+    with pytest.raises(ValueError, match="循环"):
         parallel_groups([first, second])
 
 
@@ -64,7 +69,7 @@ def test_five_workers_are_exposed_as_read_only_agent_tools():
     tools = create_worker_tools()
 
     assert {tool.name for tool in tools} == {
-        "destination_research_agent",
+        "attractions_research_agent",
         "transport_research_agent",
         "hotel_research_agent",
         "food_research_agent",

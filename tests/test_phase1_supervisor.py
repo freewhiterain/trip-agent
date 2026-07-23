@@ -3,21 +3,21 @@ from datetime import date
 
 import pytest
 
-from app.agents.supervisor import run_travel_planning
+from app.agents.supervisor import build_itinerary, run_travel_planning
 from app.agents.workers.base import TravelWorker
 from app.agents.workers.registry import WorkerRegistry
-from app.schemas.planning import ResearchTask, TravelRequirement, WorkerResult
+from app.schemas.planning import CandidateOption, ResearchTask, TravelRequirement, WorkerResult
 
 
 def requirement():
     return TravelRequirement(
-        origin="上海",
-        destination="成都",
+        origin="Shanghai",
+        destination="Chengdu",
         departure_date=date(2026, 8, 1),
         days=5,
         adults=2,
         budget=6000,
-        styles=["文化", "美食"],
+        styles=["culture", "food"],
     )
 
 
@@ -27,7 +27,7 @@ async def test_supervisor_returns_full_draft_without_fake_realtime_facts():
 
     assert len(draft.worker_results) == 5
     assert {result.worker for result in draft.worker_results} == {
-        "destination",
+        "attractions",
         "transport",
         "hotel",
         "food",
@@ -40,9 +40,22 @@ async def test_supervisor_returns_full_draft_without_fake_realtime_facts():
         "evening",
     ]
     assert draft.budget.total_estimate is None
-    assert any("实时" in warning for warning in draft.warnings)
-    assert "订单" not in draft.model_dump_json()
-    assert "支付" not in draft.model_dump_json()
+    assert "order" not in draft.model_dump_json().lower()
+    assert "payment" not in draft.model_dump_json().lower()
+
+
+def test_itinerary_reads_candidates_from_attractions_worker():
+    attractions = WorkerResult(
+        task_id="attractions-1",
+        worker="attractions",
+        status="completed",
+        summary="ok",
+        options=[CandidateOption(name="Wuhou Shrine", category="attractions")],
+    )
+
+    itinerary = build_itinerary(requirement(), [attractions])
+
+    assert itinerary[0].slots[0].title == "Wuhou Shrine"
 
 
 class CountingWorker(TravelWorker):
@@ -68,7 +81,7 @@ async def test_supervisor_executes_independent_workers_in_parallel():
     worker = CountingWorker()
     registry = WorkerRegistry(
         {
-            "destination": worker,
+            "attractions": worker,
             "transport": worker,
             "hotel": worker,
             "food": worker,

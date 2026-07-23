@@ -26,7 +26,7 @@ docker run -d `
   -e POSTGRES_DB=ai_travel_db `
   -e POSTGRES_USER=travel_user `
   -e POSTGRES_PASSWORD=travel123456 `
-  -p 5432:5432 `
+  -p 15432:5432 `
   --restart unless-stopped `
   pgvector/pgvector:pg17
 
@@ -66,16 +66,16 @@ python scripts/init_rag.py
 
 ```powershell
 python app/main.py
-# 访问 http://localhost:8000/docs
+# 访问 http://localhost:18000/docs
 ```
 
 ## 项目结构
 
 ```
 app/
-├── core/          # 状态、Checkpointer、Store、中间件
-├── agents/        # Handoffs主流程、Router、Subagents
-├── tools/         # 状态转换工具、回退工具
+├── core/          # Checkpointer、Store
+├── agents/        # 对话协调器、Supervisor 图、Planner、Workers
+├── governance/    # 事件、审批、偏好、行程草稿仓库
 ├── rag/           # 混合检索、向量存储
 ├── mcp_core/      # MCP 服务器和客户端
 ├── api/           # FastAPI 路由
@@ -90,19 +90,24 @@ data/documents/    # RAG 文档库（放 .md 攻略文件）
 
 LangGraph 1.0 · LangChain 1.0 · FastAPI · PostgreSQL 17 + pgvector · Redis · ChromaDB · Qwen-Max · SSE
 
-## 当前首版实现状态
+## 当前实现状态
 
-首版默认使用 `TRAVEL_AGENT_MODE=supervisor`，提供只读旅行规划与推荐：
+每轮消息先由 Main Agent 路由：旅行规划进入表单 Tool，开放旅行问题进入 RAG，其余消息直接对话。新会话会主动询问是否需要规划旅行。
 
-- Supervisor + Planner-Worker，并行执行目的地、交通、住宿、美食和天气研究。
+- 表单通过 Tool Call / Tool Result 交互，必须收集目的地、出发日期和旅行天数，不使用默认日期或默认天数。
+- 目的地未定时可暂停表单并请求 RAG 推荐；选择城市后恢复原表单状态。
+- 只有三项必填字段完整后才调用 Supervisor。Supervisor 调度景点、天气、交通、住宿和美食五类 Worker。
+- Worker 的实时数据源设计暂缓；未配置可用数据源时必须明确降级，不生成虚构事实。
+- 行程草稿常驻（`models/draft.py` + `governance/drafts.py`）：每个会话一份可增量编辑的草稿，版本递增；正式行程仍需审批落库。
+- 行程草稿常驻（`models/draft.py` + `governance/drafts.py`）：每个会话一份可增量编辑的草稿，版本递增；正式行程仍需审批落库。
 - Hybrid RAG：稳定文档/切片 ID、BM25、Dense、RRF、相关性重排和父文档回溯。
 - Evidence：来源、URL、查询时间、有效期、置信度和冲突检查。
 - MCP/API 可靠性：超时、有限重试、请求去重、TTL 缓存、熔断和明确降级。
-- LangGraph Checkpointer、任务事件、Interrupt 审批和用户隔离。
+- LangGraph Checkpointer、任务事件持久化（含 task_failed）和用户隔离。
 - 用户明确批准后才写入长期偏好或覆盖正式行程。
-- 首版不提供购票、预订、支付、退款、取消、改签或外部消息发送。
+- 不提供购票、预订、支付、退款、取消、改签或外部消息发送。
 
-没有配置实时数据源时，系统会明确说明数据不可用，不生成虚构班次、价格、库存或天气。
+没有配置实时数据源时，系统会明确说明数据不可用，不生成虚构班次、价格、库存或天气。旧 Handoffs 状态机与交通 Subagents 已退役。
 
 ## 关键配置
 
