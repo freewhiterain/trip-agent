@@ -111,3 +111,58 @@ def test_resolve_relations_links_near_when_target_is_known():
     assert resolved[0].from_name == "青羊区住宿片区"
     assert resolved[0].to_name == "宽窄巷子"
     assert resolved[0].relation_type == "near"
+
+
+import pytest
+
+from app.rag.graph_extraction import extract_relations_with_llm
+
+
+class _FakeStructuredLlm:
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.messages = None
+
+    def with_structured_output(self, _schema):
+        return self
+
+    async def ainvoke(self, messages):
+        self.messages = messages
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+@pytest.mark.asyncio
+async def test_extract_relations_with_llm_returns_empty_when_llm_is_none():
+    assert await extract_relations_with_llm(attractions_doc(), None) == []
+
+
+@pytest.mark.asyncio
+async def test_extract_relations_with_llm_returns_empty_on_failure():
+    llm = _FakeStructuredLlm(error=RuntimeError("model unavailable"))
+
+    assert await extract_relations_with_llm(attractions_doc(), llm) == []
+
+
+@pytest.mark.asyncio
+async def test_extract_relations_with_llm_maps_structured_response():
+    from app.rag.graph_extraction import _LLMExtraction, _LLMRelation
+
+    llm = _FakeStructuredLlm(
+        response=_LLMExtraction(
+            relations=[_LLMRelation(from_name="宽窄巷子", relation_type="near", to_name="武侯祠")]
+        )
+    )
+
+    relations = await extract_relations_with_llm(attractions_doc(), llm)
+
+    assert len(relations) == 1
+    assert relations[0].from_name == "宽窄巷子"
+    assert relations[0].relation_type == "near"
+    assert relations[0].to_name == "武侯祠"
+    assert relations[0].confidence == 0.6
+    assert relations[0].city == "成都"
+    prompt = "\n".join(message["content"] for message in llm.messages)
+    assert "不得编造" in prompt

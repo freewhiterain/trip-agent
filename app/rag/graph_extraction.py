@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from langchain_core.documents import Document
+from pydantic import BaseModel, Field
 
 
 HEADING_PATTERN = re.compile(r"^### (.+)$", re.MULTILINE)
@@ -151,3 +153,48 @@ def resolve_relations(
             )
         )
     return extra_entities, resolved
+
+
+class _LLMRelation(BaseModel):
+    from_name: str
+    relation_type: Literal["located_in", "near", "connects_to"]
+    to_name: str
+
+
+class _LLMExtraction(BaseModel):
+    relations: list[_LLMRelation] = Field(default_factory=list)
+
+
+async def extract_relations_with_llm(document: Document, llm: Any | None) -> list[ExtractedRelation]:
+    city = str(document.metadata.get("city", "")).strip()
+    category = str(document.metadata.get("category", "")).strip()
+    source = str(document.metadata.get("source", ""))
+    if llm is None or not city or not category:
+        return []
+    try:
+        structured = llm.with_structured_output(_LLMExtraction)
+        response = await structured.ainvoke(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是知识图谱抽取助手。只能使用给定文档内容识别实体之间的关系，"
+                        "不得编造文档中不存在的实体或关系。relation_type 只能是 "
+                        "located_in、near 或 connects_to。"
+                    ),
+                },
+                {"role": "user", "content": document.page_content},
+            ]
+        )
+        extraction = _LLMExtraction.model_validate(response)
+    except Exception:
+        return []
+    return [
+        ExtractedRelation(
+            city=city, from_name=item.from_name.strip(), from_category=category,
+            relation_type=item.relation_type, to_name=item.to_name.strip(),
+            source_document=source, confidence=0.6,
+        )
+        for item in extraction.relations
+        if item.from_name.strip() and item.to_name.strip()
+    ]
