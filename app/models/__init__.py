@@ -1,7 +1,7 @@
 from app.models.base import Base
 from app.models.conversation import Conversation
 from app.models.draft import TripDraft
-from app.models.governance import Approval, SavedItinerary, TaskEvent, UserPreference
+from app.models.governance import Approval, SavedItinerary, TaskEvent, TripHistory, UserPreference
 from app.models.knowledge_graph import KnowledgeEntity, KnowledgeRelation
 from app.models.message import Message
 from app.models.tool_invocation import ToolInvocation
@@ -18,6 +18,7 @@ __all__ = [
     "TaskEvent",
     "ToolInvocation",
     "TripDraft",
+    "TripHistory",
     "User",
     "UserPreference",
 ]

@@ -8,8 +8,8 @@ from uuid import UUID
 from sqlalchemy import func, select, text
 
 from app.models.base import async_session_maker
-from app.models.governance import Approval, SavedItinerary, TaskEvent, UserPreference
-from app.schemas.governance import ApprovalRecord, PreferenceRecord, TaskEventRecord
+from app.models.governance import Approval, SavedItinerary, TaskEvent, TripHistory, UserPreference
+from app.schemas.governance import ApprovalRecord, PreferenceRecord, TaskEventRecord, TripHistoryRecord
 
 
 class PostgresApprovalRepository:
@@ -166,3 +166,39 @@ class PostgresItineraryRepository:
             if entity is None:
                 return None
             return {"id": str(entity.id), "user_id": user_id, "conversation_id": conversation_id, "version": entity.version, "title": entity.title, "content": entity.content}
+
+
+class PostgresTripHistoryRepository:
+    def __init__(self, session_factory=async_session_maker):
+        self.session_factory = session_factory
+
+    async def append(self, record: TripHistoryRecord) -> TripHistoryRecord:
+        entity = TripHistory(
+            id=UUID(record.id), user_id=UUID(record.user_id), destination=record.destination,
+            start_date=record.start_date, end_date=record.end_date,
+            visited_attractions=record.visited_attractions,
+            source_itinerary_id=UUID(record.source_itinerary_id),
+        )
+        async with self.session_factory() as session, session.begin():
+            session.add(entity)
+            return TripHistoryRecord(
+                id=str(entity.id), user_id=str(entity.user_id), destination=entity.destination,
+                start_date=entity.start_date, end_date=entity.end_date,
+                visited_attractions=entity.visited_attractions,
+                source_itinerary_id=str(entity.source_itinerary_id), confirmed_at=entity.confirmed_at,
+            )
+
+    async def list(self, user_id: str) -> list[TripHistoryRecord]:
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(TripHistory).where(TripHistory.user_id == UUID(user_id)).order_by(TripHistory.confirmed_at)
+            )
+            return [
+                TripHistoryRecord(
+                    id=str(item.id), user_id=str(item.user_id), destination=item.destination,
+                    start_date=item.start_date, end_date=item.end_date,
+                    visited_attractions=item.visited_attractions,
+                    source_itinerary_id=str(item.source_itinerary_id), confirmed_at=item.confirmed_at,
+                )
+                for item in result.scalars()
+            ]

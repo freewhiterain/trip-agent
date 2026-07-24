@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -44,6 +44,17 @@ class PreferenceRecord(BaseModel):
     source: str = "user_confirmed"
     confirmed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TripHistoryRecord(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    user_id: str
+    destination: str
+    start_date: date
+    end_date: date
+    visited_attractions: list[str] = Field(default_factory=list)
+    source_itinerary_id: str
+    confirmed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ApprovalDecisionRequest(BaseModel):
