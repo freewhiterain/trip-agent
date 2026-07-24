@@ -133,6 +133,15 @@
 一条。历史记录不删除、不物理覆盖，具体的表结构调整（是否需要新增版本号
 或直接依赖时间戳排序）留给实施计划阶段确定。
 
+需要注意：本项目没有引入 Alembic 之类的迁移工具，schema 变更是靠
+`scripts/init_db.py` 运行时的 `Base.metadata.create_all` 生效的，而
+`create_all` 只会补建缺失的表/列，不会删除已存在表上的约束。也就是说，
+如果某个数据库在这次改动之前已经跑过 `init_db()`，`user_preference`
+表上旧的 `uq_user_preference_key` 唯一约束依然会留在库里，需要手动执行
+`ALTER TABLE user_preference DROP CONSTRAINT uq_user_preference_key;`
+清理掉，否则同一个 key 第二次确认写入时会触发未捕获的 `IntegrityError`
+（这条写入路径不像读取路径那样有降级处理）。
+
 ### 3. 行程历史记录（Layer 2b，新增）
 
 在 `ItineraryGovernanceService.apply`（用户对 `itinerary.save` 审批

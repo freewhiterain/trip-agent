@@ -34,7 +34,7 @@ async def create_planning_task(requirement: TravelRequirement, user: User = Depe
     try:
         defaults = await resolve_preference_defaults(str(user.id), PostgresPreferenceRepository())
     except Exception as exc:
-        app_logger.warning(f"读取长期偏好失败，按无偏好处理: task_id={task_id} error={exc}")
+        app_logger.warning(f"读取长期偏好失败，按无偏好处理: task_id={task_id} error={exc}", exc_info=True)
         defaults = {}
     requirement = apply_preference_defaults(requirement, defaults)
     draft = await run_travel_planning(
