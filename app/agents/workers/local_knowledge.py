@@ -2,28 +2,49 @@
 
 from functools import lru_cache
 
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 from app.rag.document_loader import DocumentManager
 from app.rag.evidence import evidence_from_document
+from app.rag.local_embeddings import LOCAL_MOCK_COLLECTION, get_ollama_embeddings
 from app.rag.reranker import RelevanceReranker
 from app.rag.retriever import HybridRetriever
 from app.rag.text_splitter import ParentDocumentSplitter
+from app.rag.vectorstore import VectorStoreManager
 from app.schemas.planning import Evidence, TaskType
+from app.utils.logger import app_logger
 
 
 class LocalKnowledgeService:
-    def __init__(self, documents: list[Document] | None = None):
+    def __init__(
+        self,
+        documents: list[Document] | None = None,
+        vectorstore: Chroma | None = None,
+    ):
         self.documents = documents if documents is not None else DocumentManager().load_all_documents()
-        self.retriever = self._build_retriever(self.documents)
+        self.vectorstore = vectorstore if vectorstore is not None else self._load_vectorstore()
+        self.retriever = self._build_retriever(self.documents, self.vectorstore)
 
     @staticmethod
-    def _build_retriever(documents: list[Document]) -> HybridRetriever | None:
+    def _load_vectorstore() -> Chroma | None:
+        try:
+            manager = VectorStoreManager(
+                collection_name=LOCAL_MOCK_COLLECTION,
+                embeddings=get_ollama_embeddings(),
+            )
+            return manager.load_vectorstore()
+        except Exception as exc:
+            app_logger.warning(f"本地向量库不可用，Dense 检索退化为跳过：{type(exc).__name__}: {exc}")
+            return None
+
+    @staticmethod
+    def _build_retriever(documents: list[Document], vectorstore: Chroma | None) -> HybridRetriever | None:
         parents, children = ParentDocumentSplitter().split_documents(documents)
         if not children:
             return None
         return HybridRetriever(
-            vectorstore=None,
+            vectorstore=vectorstore,
             documents=children,
             parent_documents=parents,
             reranker=RelevanceReranker(),
@@ -53,10 +74,18 @@ class LocalKnowledgeService:
             return []
 
         retrieval_query = f"{destination} {category} {query}"
-        retriever = self._build_retriever(documents)
+        retriever = self._build_retriever(documents, self.vectorstore)
         if retriever is None:
             return []
-        return [evidence_from_document(document) for document in retriever.retrieve(retrieval_query)]
+        metadata_filter = (
+            {"$and": [{"city": destination}, {"category": category}]}
+            if self.vectorstore is not None
+            else None
+        )
+        return [
+            evidence_from_document(document)
+            for document in retriever.retrieve(retrieval_query, metadata_filter=metadata_filter)
+        ]
 
 
 @lru_cache(maxsize=1)

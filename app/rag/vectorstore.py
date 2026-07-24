@@ -4,6 +4,7 @@
 from typing import List
 from pathlib import Path
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_chroma import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
 from app.config import settings
@@ -13,12 +14,17 @@ from app.utils.logger import app_logger
 class VectorStoreManager:
     """向量数据库管理器"""
 
-    def __init__(self, persist_directory: str = "data/vectorstore", collection_name: str = "travel_guides"):
+    def __init__(
+        self,
+        persist_directory: str = "data/vectorstore",
+        collection_name: str = "travel_guides",
+        embeddings: Embeddings | None = None,
+    ):
         self.persist_directory = Path(persist_directory)
         self.collection_name = collection_name
         self.persist_directory.mkdir(parents=True, exist_ok=True)
 
-        self.embeddings = DashScopeEmbeddings(
+        self.embeddings = embeddings or DashScopeEmbeddings(
             model="text-embedding-v2",
             dashscope_api_key=settings.dashscope_api_key
         )

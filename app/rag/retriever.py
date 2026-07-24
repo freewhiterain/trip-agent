@@ -99,12 +99,16 @@ class HybridRetriever:
         bm25_docs = [(self.documents[i], bm25_scores[i]) for i in bm25_top_indices]
         app_logger.debug(f"BM25 检索到 {len(bm25_docs)} 个候选")
 
-        # Dense 检索
-        dense_docs = (
-            self.vectorstore.similarity_search_with_score(query, k=self.k * 2)
-            if self.vectorstore is not None
-            else []
-        )
+        # Dense 检索（失败时降级为空候选，不影响 BM25 结果）
+        dense_docs: List[Tuple[Document, float]] = []
+        if self.vectorstore is not None:
+            try:
+                dense_docs = self.vectorstore.similarity_search_with_score(
+                    query, k=self.k * 2, filter=metadata_filter
+                )
+            except Exception as exc:
+                app_logger.warning(f"Dense 检索失败，本次查询退化为纯 BM25：{type(exc).__name__}: {exc}")
+                dense_docs = []
         app_logger.debug(f"Dense 检索到 {len(dense_docs)} 个候选")
 
         # RRF 融合
