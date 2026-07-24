@@ -1,139 +1,70 @@
-# Task 4 Report
+# Task 4 Report: 把行程历史接入 `ItineraryGovernanceService`
 
-## Status
+## Summary
 
-Implemented proactive conversation creation. Each new conversation now persists exactly one assistant greeting in the same database session and transaction, and the create response exposes the serialized message as `initial_message`.
+Successfully implemented trip history recording integration into the `ItineraryGovernanceService`. When a user's formal itinerary save is approved, a trip history record is now automatically appended as a side effect.
 
-## Red Evidence
+## Implementation Details
 
-Command:
+### Changes Made
 
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py -q
+1. **Created test file**: `tests/test_itinerary_trip_history_wiring.py`
+   - Test that confirmed itinerary saves append trip history records
+   - Test that itinerary saves succeed even when trip history repository fails
+   - Test that itinerary saves work without trip history repository configured (backward compatibility)
+
+2. **Modified**: `app/governance/itineraries.py`
+   - Added imports: `uuid4`, `TripHistoryRepository`, `record_trip_history_from_itinerary`
+   - Updated `InMemoryItineraryRepository.save()` to generate and include `id` field using `uuid4()`
+   - Updated `ItineraryGovernanceService.__init__()` to accept optional `trip_history: TripHistoryRepository | None = None` parameter
+   - Updated `ItineraryGovernanceService.apply()` to:
+     - Store the saved itinerary result in a variable
+     - Call `record_trip_history_from_itinerary()` when `trip_history` is not None
+     - Return the saved record
+
+### Test Results
+
+All tests pass successfully:
+
+```
+============================= test session starts =============================
+tests/test_itinerary_trip_history_wiring.py::test_confirmed_itinerary_save_appends_trip_history PASSED [ 11%]
+tests/test_itinerary_trip_history_wiring.py::test_itinerary_save_succeeds_even_when_trip_history_repository_fails PASSED [ 22%]
+tests/test_itinerary_trip_history_wiring.py::test_itinerary_save_works_without_trip_history_repository_configured PASSED [ 33%]
+tests/test_phase3_governance.py::test_memory_is_not_written_before_owner_approval PASSED [ 44%]
+tests/test_phase3_governance.py::test_edit_and_delete_memory_require_separate_approvals PASSED [ 55%]
+tests/test_phase3_governance.py::test_formal_itinerary_save_and_overwrite_are_approved_and_versioned PASSED [ 66%]
+tests/test_phase3_governance.py::test_interrupt_workflow_pauses_and_resumes_with_same_thread PASSED [ 77%]
+tests/test_phase3_governance.py::test_supervisor_persists_checkpoint_and_ordered_events PASSED [ 88%]
+tests/test_phase3_governance.py::test_governance_tables_are_registered_for_database_initialization PASSED [100%]
+
+9 passed in 5.48s
 ```
 
-Result:
+## Files Modified
 
-```text
-1 failed, 1 warning in 1.85s
+- `app/governance/itineraries.py` - Added trip history support
+- `tests/test_itinerary_trip_history_wiring.py` - Created new test file
+
+## Commit
+
+```
+6c49420 feat(memory): append trip history when a formal itinerary save is approved
 ```
 
-The failing assertion was `assert len(db.messages) == 1`; the existing API created zero messages.
+## Self-Review Findings
 
-## Green Evidence
+✓ Implementation matches the brief exactly
+✓ All tests pass (both new and existing)
+✓ TDD approach followed: tests written first, then implementation
+✓ Backward compatibility maintained: `trip_history` parameter is optional
+✓ Error handling preserved: `record_trip_history_from_itinerary` catches all exceptions internally
+✓ No stray files or debug prints
+✓ The `id` field addition to `InMemoryItineraryRepository.save()` does not break existing tests
+✓ Code follows the exact structure specified in the brief
 
-Command:
+## Notes
 
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-```
-
-Result:
-
-```text
-3 passed, 2 warnings in 28.48s
-```
-
-The focused test verifies assistant role/content, `extra_info={"kind": "conversation_offer"}`, the `initial_message` response field, one commit, and no duplicate message after two reads.
-
-## Concerns
-
-- The focused test uses an in-memory session because the repository test suite does not provide a database fixture; live PostgreSQL integration was not exercised.
-- The green run reports dependency warnings from LangGraph and `pkg_resources`, unrelated to this change.
-
-## Additional Test Evidence
-
-Added to `tests/test_conversation_greeting.py`:
-
-- An actual FastAPI `TestClient` POST with auth and DB dependency overrides verifies JSON serialization of `initial_message`, including its role, content, conversation ID, and `extra_info.kind`, alongside standard conversation fields.
-- The strict recording session verifies the conversation and greeting are added in that order before one commit snapshot containing both records.
-- A commit failure returns HTTP 500, propagates through the endpoint, records one attempted commit, records zero successful commits, and triggers the override's rollback path.
-- The HTTP GET read route leaves message count, add events, and commit attempts unchanged.
-
-Command:
-
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-```
-
-Result:
-
-```text
-5 passed, 2 warnings in 13.29s
-```
-
-The tests use the strict fake session rather than a real SQLAlchemy async session because the repository does not provide a database test fixture and no live PostgreSQL integration was available for this focused test run.
-
-## PostgreSQL Transaction Test Evidence
-
-Added durable opt-in tests in `tests/test_conversation_greeting.py` guarded by `RUN_POSTGRES_TESTS=1`:
-
-- A unique generated user exercises the real `async_session_maker`; successful creation is queried in a new session and must leave exactly one conversation and one assistant `conversation_offer` message.
-- A SQLAlchemy `after_flush_postexec` hook raises after `create_conversation` has flushed both entities. The session rolls back, and a new session verifies that the staged conversation and its messages do not exist.
-- Cleanup deletes messages before conversations before the unique user, with rollback and re-raise on cleanup failure.
-
-Command:
-
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-```
-
-Result:
-
-```text
-...ss..                                                                  [100%]
-5 passed, 2 skipped, 3 warnings in 9.54s
-```
-
-The two skipped tests are the PostgreSQL integration tests; this environment did not run them because `RUN_POSTGRES_TESTS=1` was not set. The warnings are the existing LangGraph, `pkg_resources`, and pytest cache-permission warnings.
-
-## Final Finding Closure Evidence
-
-Production transaction ownership now remains with `get_db`: `create_conversation` flushes and refreshes both entities for IDs and response serialization, but does not commit. Direct-call success tests explicitly commit their recording or PostgreSQL session after the handler returns. The HTTP override now yields, commits after the handler succeeds, and rolls back on exceptions; a read request records only that dependency-lifecycle commit and no new entities.
-
-The PostgreSQL rollback test injects the forced exception from `after_flush_postexec` only after the conversation and greeting have both been flushed. It rolls back and verifies both IDs with a newly opened session. The success test commits in its first session and verifies exactly one conversation and one assistant `conversation_offer` message from a separate newly opened session.
-
-Red command and result:
-
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-1 failed, 4 passed, 2 skipped, 4 warnings in 7.88s
-```
-
-The red failure was the expected extra commit observed while the handler still owned the commit.
-
-Final command and result:
-
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-...ss..                                                                  [100%]
-5 passed, 2 skipped, 3 warnings in 7.85s
-```
-
-The two skipped tests require `RUN_POSTGRES_TESTS=1` and a reachable PostgreSQL database. The warnings are the existing LangGraph deprecation, `pkg_resources`, and pytest cache-permission warnings.
-
-## Final P1 Closure Evidence
-
-The handler now flushes the conversation, stages and flushes the greeting, then explicitly commits both entities before refreshing and returning. The dependency override models `get_db` by issuing a later no-op commit after a successful handler; its commit snapshot is empty and does not represent duplicate data mutation. Handler commit failure returns HTTP 500, rolls back, and leaves zero persisted records in the harness.
-
-The PostgreSQL rollback test installs a `before_commit` failure hook only after the handler has explicitly flushed both entities. The hook therefore exercises the handler commit boundary; the test rolls back and verifies the conversation and greeting IDs are absent from a separate session. PostgreSQL success relies on the handler commit and verifies the persisted rows from a separate session.
-
-Red command and result:
-
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-FFFss..                                                                  [100%]
-3 failed, 2 passed, 2 skipped, 4 warnings in 7.76s
-```
-
-The red failures were the expected missing handler commit, missing dependency no-op commit assertion, and 200 response from the pre-fix teardown-only failure path.
-
-Final command and result:
-
-```text
-.venv\Scripts\python.exe -m pytest tests/test_conversation_greeting.py tests/test_phase0_api_compatibility.py -q
-...ss..                                                                  [100%]
-5 passed, 2 skipped, 3 warnings in 8.20s
-```
-
-The two skipped tests are the guarded PostgreSQL integration tests because `RUN_POSTGRES_TESTS=1` was not set in this environment.
+- The implementation correctly handles the case where trip history recording fails - the itinerary save itself is not affected
+- The optional `trip_history` parameter ensures backward compatibility for cases where the repository is not configured
+- The `id` field generation uses `uuid4()` as specified, ensuring unique identifiers for each saved itinerary
