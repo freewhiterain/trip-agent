@@ -18,23 +18,24 @@ class PreferenceRepository(Protocol):
 
 class InMemoryPreferenceRepository:
     def __init__(self):
-        self.records: dict[tuple[str, str], PreferenceRecord] = {}
+        self.records: list[PreferenceRecord] = []
 
     async def upsert(self, record: PreferenceRecord) -> PreferenceRecord:
-        key = (record.user_id, record.key)
-        existing = self.records.get(key)
-        if existing:
-            record.id = existing.id
-            record.confirmed_at = existing.confirmed_at
-        record.updated_at = datetime.now(timezone.utc)
-        self.records[key] = record.model_copy(deep=True)
-        return record
+        now = datetime.now(timezone.utc)
+        stored = record.model_copy(deep=True)
+        stored.confirmed_at = now
+        stored.updated_at = now
+        self.records.append(stored)
+        return stored.model_copy(deep=True)
 
     async def delete(self, user_id: str, key: str) -> bool:
-        return self.records.pop((user_id, key), None) is not None
+        remaining = [r for r in self.records if not (r.user_id == user_id and r.key == key)]
+        deleted = len(remaining) != len(self.records)
+        self.records = remaining
+        return deleted
 
     async def list(self, user_id: str) -> list[PreferenceRecord]:
-        return [record.model_copy(deep=True) for (owner, _), record in self.records.items() if owner == user_id]
+        return [record.model_copy(deep=True) for record in self.records if record.user_id == user_id]
 
 
 class MemoryGovernanceService:

@@ -36,15 +36,13 @@ class Approval(Base):
 
 
 class UserPreference(Base):
-    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_user_preference_key"),)
-
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), index=True)
-    key: Mapped[str] = mapped_column(String(80))
+    key: Mapped[str] = mapped_column(String(80), index=True)
     value: Mapped[dict] = mapped_column(JSON)
     source: Mapped[str] = mapped_column(String(40), default="user_confirmed")
-    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
 
 
 class SavedItinerary(Base):

@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select, text
-from sqlalchemy.dialects.postgresql import insert
 
 from app.models.base import async_session_maker
 from app.models.governance import Approval, SavedItinerary, TaskEvent, UserPreference
@@ -91,21 +90,13 @@ class PostgresPreferenceRepository:
 
     async def upsert(self, record: PreferenceRecord) -> PreferenceRecord:
         now = datetime.now(timezone.utc)
-        statement = (
-            insert(UserPreference)
-            .values(
-                id=UUID(record.id), user_id=UUID(record.user_id), key=record.key,
-                value=record.value, source=record.source,
-                confirmed_at=record.confirmed_at, updated_at=now,
-            )
-            .on_conflict_do_update(
-                constraint="uq_user_preference_key",
-                set_={"value": record.value, "source": record.source, "updated_at": now},
-            )
-            .returning(UserPreference)
+        entity = UserPreference(
+            id=UUID(record.id), user_id=UUID(record.user_id), key=record.key,
+            value=record.value, source=record.source,
+            confirmed_at=now, updated_at=now,
         )
         async with self.session_factory() as session, session.begin():
-            entity = (await session.execute(statement)).scalar_one()
+            session.add(entity)
             return PreferenceRecord(
                 id=str(entity.id), user_id=str(entity.user_id), key=entity.key,
                 value=entity.value, source=entity.source,
@@ -114,18 +105,23 @@ class PostgresPreferenceRepository:
 
     async def delete(self, user_id: str, key: str) -> bool:
         async with self.session_factory() as session, session.begin():
-            entity = await session.scalar(
-                select(UserPreference).where(UserPreference.user_id == UUID(user_id), UserPreference.key == key)
-            )
-            if entity is None:
+            entities = (
+                await session.scalars(
+                    select(UserPreference).where(UserPreference.user_id == UUID(user_id), UserPreference.key == key)
+                )
+            ).all()
+            if not entities:
                 return False
-            await session.delete(entity)
+            for entity in entities:
+                await session.delete(entity)
             return True
 
     async def list(self, user_id: str) -> list[PreferenceRecord]:
         async with self.session_factory() as session:
             result = await session.execute(
-                select(UserPreference).where(UserPreference.user_id == UUID(user_id)).order_by(UserPreference.key)
+                select(UserPreference)
+                .where(UserPreference.user_id == UUID(user_id))
+                .order_by(UserPreference.key, UserPreference.confirmed_at)
             )
             return [
                 PreferenceRecord(
