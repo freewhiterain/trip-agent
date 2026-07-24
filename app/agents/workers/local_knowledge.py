@@ -5,10 +5,11 @@ from functools import lru_cache
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
+from app.config import settings
 from app.rag.document_loader import DocumentManager
 from app.rag.evidence import evidence_from_document
 from app.rag.local_embeddings import LOCAL_MOCK_COLLECTION, get_ollama_embeddings
-from app.rag.reranker import RelevanceReranker
+from app.rag.reranker import CrossEncoderReranker, RelevanceReranker
 from app.rag.retriever import HybridRetriever
 from app.rag.text_splitter import ParentDocumentSplitter
 from app.rag.vectorstore import VectorStoreManager
@@ -39,6 +40,12 @@ class LocalKnowledgeService:
             return None
 
     @staticmethod
+    def _select_reranker() -> RelevanceReranker:
+        if settings.enable_cross_encoder_rerank:
+            return CrossEncoderReranker(settings.cross_encoder_model)
+        return RelevanceReranker()
+
+    @staticmethod
     def _build_retriever(documents: list[Document], vectorstore: Chroma | None) -> HybridRetriever | None:
         parents, children = ParentDocumentSplitter().split_documents(documents)
         if not children:
@@ -47,7 +54,7 @@ class LocalKnowledgeService:
             vectorstore=vectorstore,
             documents=children,
             parent_documents=parents,
-            reranker=RelevanceReranker(),
+            reranker=LocalKnowledgeService._select_reranker(),
             k=4,
         )
 

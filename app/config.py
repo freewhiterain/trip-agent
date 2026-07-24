@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     external_timeout_seconds: float = Field(default=10.0, alias="EXTERNAL_TIMEOUT_SECONDS")
     external_max_retries: int = Field(default=2, alias="EXTERNAL_MAX_RETRIES")
 
+    # ============== RAG 检索配置 ==============
+    enable_cross_encoder_rerank: bool = Field(default=False, alias="ENABLE_CROSS_ENCODER_RERANK")
+    cross_encoder_model: str = Field(default="BAAI/bge-reranker-base", alias="CROSS_ENCODER_MODEL")
+
     def validate_security(self) -> None:
         """拒绝在非开发环境使用公开的默认 JWT 密钥。"""
         if (
