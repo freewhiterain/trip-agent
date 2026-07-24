@@ -28,6 +28,22 @@ def test_search_destination_filters_dense_search_by_city_and_category():
     assert vectorstore.calls[0]["filter"] == {"$and": [{"city": "成都"}, {"category": "attractions"}]}
 
 
+def test_search_destination_strips_but_does_not_casefold_dense_metadata_filter():
+    documents = [
+        Document(
+            page_content="位于成华区。是熊猫文化主题下的代表性自然教育地点。",
+            metadata={"city": "成都", "category": "attractions", "chunk_id": "panda"},
+        ),
+    ]
+    vectorstore = _RecordingVectorstore()
+    service = LocalKnowledgeService(documents=documents, vectorstore=vectorstore)
+
+    service.search_destination(" 成都 ", " attractions ", "熊猫基地")
+
+    assert vectorstore.calls
+    assert vectorstore.calls[0]["filter"] == {"$and": [{"city": "成都"}, {"category": "attractions"}]}
+
+
 def test_service_reuses_the_same_vectorstore_instance_across_queries_without_rebuilding():
     documents = [
         Document(

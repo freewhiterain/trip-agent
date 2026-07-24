@@ -85,7 +85,7 @@ class LocalKnowledgeService:
         if retriever is None:
             return []
         metadata_filter = (
-            {"$and": [{"city": destination}, {"category": category}]}
+            {"$and": [{"city": destination.strip()}, {"category": category.strip()}]}
             if self.vectorstore is not None
             else None
         )
