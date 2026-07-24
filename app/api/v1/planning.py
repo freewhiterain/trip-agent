@@ -15,11 +15,14 @@ from app.governance.postgres import (
     PostgresEventRepository,
     PostgresItineraryRepository,
     PostgresPreferenceRepository,
+    PostgresTripHistoryRepository,
 )
+from app.memory.defaults import apply_preference_defaults, resolve_preference_defaults
 from app.memory.service import MemoryGovernanceService
 from app.models.user import User
 from app.schemas.governance import ApprovalDecisionRequest, ItinerarySaveRequest, PreferenceProposalRequest
 from app.schemas.planning import TravelRequirement
+from app.utils.logger import app_logger
 
 router = APIRouter(tags=["旅行规划任务"])
 
@@ -28,6 +31,12 @@ router = APIRouter(tags=["旅行规划任务"])
 async def create_planning_task(requirement: TravelRequirement, user: User = Depends(get_current_user)):
     task_id = uuid4().hex
     event_service = TaskEventService(PostgresEventRepository())
+    try:
+        defaults = await resolve_preference_defaults(str(user.id), PostgresPreferenceRepository())
+    except Exception as exc:
+        app_logger.warning(f"读取长期偏好失败，按无偏好处理: task_id={task_id} error={exc}")
+        defaults = {}
+    requirement = apply_preference_defaults(requirement, defaults)
     draft = await run_travel_planning(
         requirement,
         checkpointer=await get_checkpointer(),
@@ -107,7 +116,7 @@ async def decide_approval(
             ).apply(record.id, str(user.id))
         elif record.status in {"approved", "edited"} and record.action.startswith("itinerary."):
             applied = await ItineraryGovernanceService(
-                approvals, PostgresItineraryRepository()
+                approvals, PostgresItineraryRepository(), PostgresTripHistoryRepository()
             ).apply(record.id, str(user.id))
         return {
             "approval": record.model_dump(mode="json"),
