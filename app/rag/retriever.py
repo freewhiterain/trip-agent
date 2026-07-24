@@ -1,5 +1,5 @@
 """
-混合检索器：BM25 + Dense + RRF 融合
+混合检索器：BM25（标题加权 + 同义词扩展 + 相邻词组加分）+ Dense + RRF 融合
 """
 from typing import List, Tuple
 from langchain_core.documents import Document
@@ -9,6 +9,11 @@ import jieba
 from app.utils.logger import app_logger
 from app.rag.identifiers import chunk_id
 from app.rag.reranker import RelevanceReranker
+from app.rag.synonyms import expand_synonyms
+
+
+TITLE_WEIGHT_REPEAT = 3
+BIGRAM_BONUS = 0.5
 
 
 class HybridRetriever:
@@ -16,8 +21,8 @@ class HybridRetriever:
     混合检索器
 
     结合：
-    - BM25（关键词匹配）
-    - Dense（语义相似度）
+    - BM25（关键词匹配，标题字段加权 + 同义词扩展召回 + 相邻词组加分）
+    - Dense（语义相似度，检索失败时自动降级为跳过）
     - RRF（倒数排名融合）
     """
 
@@ -41,25 +46,51 @@ class HybridRetriever:
         self._init_bm25()
 
     def _init_bm25(self):
-        """初始化 BM25 索引"""
+        """初始化 BM25 索引：section_title 命中的词会重复计入，获得更高权重。"""
         app_logger.info("初始化 BM25 索引...")
-        tokenized_docs = [list(jieba.cut(doc.page_content)) for doc in self.documents]
+        tokenized_docs = [self._tokenize_document(doc) for doc in self.documents]
         self.bm25 = BM25Okapi(tokenized_docs)
         app_logger.info("✅ BM25 索引初始化完成")
 
-    def retrieve(self, query: str) -> List[Document]:
+    @staticmethod
+    def _tokenize_document(document: Document) -> List[str]:
+        body_tokens = list(jieba.cut(document.page_content))
+        section_title = str(document.metadata.get("section_title", "")).strip()
+        if not section_title:
+            return body_tokens
+        title_tokens = list(jieba.cut(section_title)) * TITLE_WEIGHT_REPEAT
+        return title_tokens + body_tokens
+
+    def _bigram_scores(self, query_tokens: List[str]) -> List[float]:
+        bigrams = ["".join(pair) for pair in zip(query_tokens, query_tokens[1:])]
+        if not bigrams:
+            return [0.0] * len(self.documents)
+        return [
+            BIGRAM_BONUS * sum(1 for bigram in bigrams if bigram in document.page_content)
+            for document in self.documents
+        ]
+
+    def retrieve(
+            self,
+            query: str,
+            *,
+            metadata_filter: dict | None = None,
+    ) -> List[Document]:
         """
         混合检索
 
         流程：
-        1. BM25 检索 top-k
-        2. Dense 检索 top-k
+        1. BM25 检索 top-k（同义词扩展召回 + 相邻词组加分）
+        2. Dense 检索 top-k（失败时自动降级，不抛出异常）
         3. RRF 融合
         4. 返回融合后的 top-k
         """
         # BM25 检索
         query_tokens = list(jieba.cut(query))
-        bm25_scores = self.bm25.get_scores(query_tokens)
+        expanded_tokens = query_tokens + expand_synonyms(query_tokens)
+        bm25_raw_scores = self.bm25.get_scores(expanded_tokens)
+        bigram_bonus = self._bigram_scores(query_tokens)
+        bm25_scores = [score + bigram_bonus[i] for i, score in enumerate(bm25_raw_scores)]
         bm25_top_indices = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
