@@ -50,3 +50,4 @@ Phase 3 final whole-branch review: Ready to merge (Yes, no Critical/Important) -
 
 Plan: docs/superpowers/plans/2026-07-24-layered-user-memory-implementation.md
 Memory Task 1: complete (commit 0344917..ef8d1c3, review Approved; Minor: PostgresPreferenceRepository append/multi-delete path has no direct Postgres-backed test in this diff (matches brief's scope, Task 3 adds the opt-in Postgres test file), caller-supplied confirmed_at always overwritten by both repos (matches brief) — deferred to final review)
+Memory Task 2: complete (commits c51630b..57ba68f, review Approved; Minor: duplicated warning branch in resolve_preference_defaults (matches brief's own code, not implementer drift), two-commit process deviation (impl + report-only commit, no code impact), apply_preference_defaults' model_copy bypasses Pydantic validation so a malformed budget (<=0) already sitting in the preference store could pass through unvalidated -- deferred to final review)
