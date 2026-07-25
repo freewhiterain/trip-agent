@@ -228,14 +228,20 @@ class DomainSubagent:
         evidence_ids = {item.id for item in evidence if item.id}
         warnings: list[str] = []
         evidence_text = " ".join(item.content for item in evidence)
+        evidence_by_id = {item.id: item for item in evidence if item.id}
 
         claims: list[Claim] = []
         for claim in analysis.claims:
             claim_ids = set(claim.evidence_ids)
+            referenced_text = " ".join(
+                evidence_by_id[evidence_id].content
+                for evidence_id in claim_ids
+                if evidence_id in evidence_by_id
+            )
             if (
                 not claim_ids
                 or not claim_ids.issubset(evidence_ids)
-                or not self._text_supported(claim.text, evidence_text)
+                or not self._text_supported(claim.text, referenced_text)
             ):
                 warnings.append("Dropped an unbound claim from subagent output.")
                 continue
@@ -244,21 +250,26 @@ class DomainSubagent:
         candidates: list[EvidenceBoundCandidate] = []
         for candidate in analysis.candidates:
             candidate_ids = set(candidate.evidence_ids)
+            referenced_text = " ".join(
+                evidence_by_id[evidence_id].content
+                for evidence_id in candidate_ids
+                if evidence_id in evidence_by_id
+            )
             if (
                 not candidate.name.strip()
                 or not candidate_ids
                 or not candidate_ids.issubset(evidence_ids)
-                or not self._text_supported(candidate.name, evidence_text)
+                or not self._text_supported(candidate.name, referenced_text)
                 or (
                     candidate.description
-                    and not self._text_supported(candidate.description, evidence_text)
+                    and not self._text_supported(candidate.description, referenced_text)
                 )
                 or (
                     candidate.estimated_cost is not None
-                    and not self._text_supported(str(candidate.estimated_cost), evidence_text)
+                    and not self._text_supported(str(candidate.estimated_cost), referenced_text)
                 )
                 or any(
-                    not self._text_supported(str(value), evidence_text)
+                    not self._text_supported(str(value), referenced_text)
                     for value in candidate.attributes.values()
                 )
             ):

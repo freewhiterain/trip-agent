@@ -194,6 +194,24 @@ def test_subagent_drops_content_not_supported_by_referenced_evidence():
     assert len(warnings) >= 2
 
 
+def test_subagent_does_not_use_unreferenced_evidence_to_ground_a_claim():
+    agent = AttractionsSubagent()
+    analysis = SubagentAnalysis(
+        claims=[Claim(text="Rain is expected.", evidence_ids=["ev-1"])],
+    )
+
+    grounded, warnings = agent._ground_analysis(
+        analysis,
+        [
+            Evidence(id="ev-1", content="Panda Base is open.", source="official"),
+            Evidence(id="ev-2", content="Rain is expected.", source="weather"),
+        ],
+    )
+
+    assert grounded.claims == []
+    assert any("unbound claim" in warning.lower() for warning in warnings)
+
+
 @pytest.mark.asyncio
 async def test_deep_search_failure_returns_structured_unavailable_response():
     async def failing_deep_search(*args, **kwargs):
