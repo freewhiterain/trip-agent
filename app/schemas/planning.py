@@ -86,6 +86,7 @@ class ResearchTask(BaseModel):
 class Evidence(BaseModel):
     """事实性结论的最小证据格式。"""
 
+    id: str | None = None
     content: str = Field(min_length=1)
     source: str = Field(min_length=1)
     source_url: str | None = None
@@ -105,6 +106,7 @@ class CandidateOption(BaseModel):
     description: str = ""
     estimated_cost: float | None = Field(default=None, ge=0)
     attributes: dict[str, Any] = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
 
 
 class WorkerResult(BaseModel):
