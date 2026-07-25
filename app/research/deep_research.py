@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from app.rag.evidence import find_conflicts, require_fresh_evidence
-from app.schemas.planning import Evidence
+from app.schemas.planning import Evidence, TaskType
+from app.schemas.research import ResearchReport
+from app.research.deep_search import DeepSearchRequest, run_deep_search
 
 
 SearchFunction = Callable[[str, int], Awaitable[list[Evidence]]]
@@ -55,3 +58,22 @@ class DeepResearchService:
             conflicts=find_conflicts(fresh),
             warnings=warnings,
         )
+
+    async def deep_search(
+        self,
+        query: str,
+        *,
+        worker: TaskType = "attractions",
+        max_rounds: int = 2,
+        max_tool_calls: int = 3,
+        evaluator: Any | None = None,
+    ) -> ResearchReport:
+        """Run the new bounded Deep Search path without changing ``research``."""
+
+        request = DeepSearchRequest(
+            query=query,
+            worker=worker,
+            max_rounds=max_rounds,
+            max_tool_calls=max_tool_calls,
+        )
+        return await run_deep_search(request, search=self.search, evaluator=evaluator)
