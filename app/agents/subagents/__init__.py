@@ -1,20 +1,29 @@
-"""Domain subagent building blocks."""
+"""Domain subagent building blocks with lazy exports to avoid import cycles."""
 
-from app.agents.subagents.attractions import AttractionsSubagent
-from app.agents.subagents.base import DomainSubagent
-from app.agents.subagents.food import FoodSubagent
-from app.agents.subagents.hotel import HotelSubagent
-from app.agents.subagents.registry import SubagentRegistry, create_default_subagent_registry
-from app.agents.subagents.transport import TransportSubagent
-from app.agents.subagents.weather import WeatherSubagent
+from importlib import import_module
 
-__all__ = [
-    "AttractionsSubagent",
-    "DomainSubagent",
-    "FoodSubagent",
-    "HotelSubagent",
-    "SubagentRegistry",
-    "TransportSubagent",
-    "WeatherSubagent",
-    "create_default_subagent_registry",
-]
+
+_EXPORTS = {
+    "AttractionsSubagent": ("app.agents.subagents.attractions", "AttractionsSubagent"),
+    "DomainSubagent": ("app.agents.subagents.base", "DomainSubagent"),
+    "FoodSubagent": ("app.agents.subagents.food", "FoodSubagent"),
+    "HotelSubagent": ("app.agents.subagents.hotel", "HotelSubagent"),
+    "SubagentRegistry": ("app.agents.subagents.registry", "SubagentRegistry"),
+    "TransportSubagent": ("app.agents.subagents.transport", "TransportSubagent"),
+    "WeatherSubagent": ("app.agents.subagents.weather", "WeatherSubagent"),
+    "create_default_subagent_registry": (
+        "app.agents.subagents.registry",
+        "create_default_subagent_registry",
+    ),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    return getattr(import_module(module_name), attribute)
+
+
+__all__ = list(_EXPORTS)

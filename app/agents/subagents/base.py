@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
@@ -90,7 +91,14 @@ class DomainSubagent:
                 break
 
         if not evidence and self.allow_deep_search:
-            research_report = await self._run_deep_search(task, requirement)
+            try:
+                research_report = await self._run_deep_search(task, requirement)
+            except Exception as exc:
+                warnings.append(f"Deep Search failed: {type(exc).__name__}.")
+                research_report = ResearchReport(
+                    status="unavailable",
+                    warnings=["Deep Search provider is unavailable."],
+                )
             if research_report is not None:
                 warnings.extend(research_report.warnings)
                 evidence = self._normalize_evidence(
@@ -195,7 +203,7 @@ class DomainSubagent:
                 name=self._evidence_title(item),
                 category=self.worker,
                 description=item.content[:240],
-                attributes={"source": item.source},
+                attributes={},
                 evidence_ids=[item.id] if item.id else [],
             )
             for item in evidence
@@ -219,11 +227,16 @@ class DomainSubagent:
     ) -> tuple[SubagentAnalysis, list[str]]:
         evidence_ids = {item.id for item in evidence if item.id}
         warnings: list[str] = []
+        evidence_text = " ".join(item.content for item in evidence)
 
         claims: list[Claim] = []
         for claim in analysis.claims:
             claim_ids = set(claim.evidence_ids)
-            if not claim_ids or not claim_ids.issubset(evidence_ids):
+            if (
+                not claim_ids
+                or not claim_ids.issubset(evidence_ids)
+                or not self._text_supported(claim.text, evidence_text)
+            ):
                 warnings.append("Dropped an unbound claim from subagent output.")
                 continue
             claims.append(claim)
@@ -231,15 +244,43 @@ class DomainSubagent:
         candidates: list[EvidenceBoundCandidate] = []
         for candidate in analysis.candidates:
             candidate_ids = set(candidate.evidence_ids)
-            if not candidate.name.strip() or not candidate_ids or not candidate_ids.issubset(evidence_ids):
+            if (
+                not candidate.name.strip()
+                or not candidate_ids
+                or not candidate_ids.issubset(evidence_ids)
+                or not self._text_supported(candidate.name, evidence_text)
+                or (
+                    candidate.description
+                    and not self._text_supported(candidate.description, evidence_text)
+                )
+                or (
+                    candidate.estimated_cost is not None
+                    and not self._text_supported(str(candidate.estimated_cost), evidence_text)
+                )
+                or any(
+                    not self._text_supported(str(value), evidence_text)
+                    for value in candidate.attributes.values()
+                )
+            ):
                 warnings.append(f"Dropped an unbound {self.worker} candidate from subagent output.")
                 continue
             candidates.append(candidate)
 
+        summary = analysis.summary
+        if summary and not self._text_supported(summary, evidence_text):
+            warnings.append("Dropped an unsupported subagent summary.")
+            summary = ""
+
         return (
-            analysis.model_copy(update={"claims": claims, "candidates": candidates}),
+            analysis.model_copy(update={"summary": summary, "claims": claims, "candidates": candidates}),
             warnings,
         )
+
+    @staticmethod
+    def _text_supported(text: str, evidence_text: str) -> bool:
+        normalized_text = " ".join(re.findall(r"\w+", text.casefold()))
+        normalized_evidence = " ".join(re.findall(r"\w+", evidence_text.casefold()))
+        return bool(normalized_text) and normalized_text in normalized_evidence
 
     async def _invoke_provider(
         self,

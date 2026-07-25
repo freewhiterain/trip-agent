@@ -7,7 +7,8 @@ from app.agents.subagents.registry import SubagentRegistry, create_default_subag
 from app.agents.subagents.transport import TransportSubagent
 from app.agents.subagents.weather import WeatherSubagent
 from app.schemas.planning import Evidence, ResearchTask, TravelRequirement
-from app.schemas.research import ResearchReport
+from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport
+from app.agents.subagents.base import SubagentAnalysis
 
 
 def requirement() -> TravelRequirement:
@@ -166,6 +167,50 @@ async def test_food_subagent_uses_bounded_deep_search_only_after_rag_and_search_
     assert [call[0].worker for call in deep_search.calls] == ["food"]
     assert result.research_report == deep_report
     assert result.candidates[0].evidence_ids == ["ev-deep"]
+
+
+def test_subagent_drops_content_not_supported_by_referenced_evidence():
+    agent = AttractionsSubagent()
+    analysis = SubagentAnalysis(
+        summary="invented summary",
+        claims=[Claim(text="invented claim", evidence_ids=["ev-1"])],
+        candidates=[EvidenceBoundCandidate(
+            name="invented place",
+            description="invented details",
+            estimated_cost=9999,
+            attributes={"availability": "guaranteed"},
+            evidence_ids=["ev-1"],
+        )],
+    )
+
+    grounded, warnings = agent._ground_analysis(
+        analysis,
+        [Evidence(id="ev-1", content="Panda Base is open in the morning.", source="official")],
+    )
+
+    assert grounded.claims == []
+    assert grounded.candidates == []
+    assert grounded.summary == ""
+    assert len(warnings) >= 2
+
+
+@pytest.mark.asyncio
+async def test_deep_search_failure_returns_structured_unavailable_response():
+    async def failing_deep_search(*args, **kwargs):
+        raise RuntimeError("provider secret should not escape")
+
+    agent = FoodSubagent(
+        rag=FakeProvider("local_rag", []),
+        search=FakeProvider("search_mcp", []),
+        deep_search=failing_deep_search,
+    )
+
+    result = await agent.run(task("food"), requirement())
+
+    assert result.status == "unavailable"
+    assert result.evidence == []
+    assert any("deep search" in warning.lower() for warning in result.warnings)
+    assert all("secret" not in warning for warning in result.warnings)
 
 
 @pytest.mark.asyncio
