@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -222,3 +223,44 @@ async def test_deep_search_respects_tool_policy_for_workers_without_deep_researc
     assert report.status == "unavailable"
     assert calls == []
     assert any("not allowed" in warning.lower() for warning in report.warnings)
+
+
+@pytest.mark.asyncio
+async def test_deep_search_enforces_timeout_for_the_whole_run():
+    async def search(query, limit):
+        return [Evidence(id="ev-1", content="current", source="official")]
+
+    class SlowEvaluator:
+        async def evaluate(self, state):
+            await asyncio.sleep(0.05)
+            return DeepSearchEvaluation(needs_follow_up=True)
+
+    report = await run_deep_search(
+        DeepSearchRequest(query="slow research", worker="attractions", timeout_seconds=0.01),
+        search=search,
+        evaluator=SlowEvaluator(),
+    )
+
+    assert report.status == "partial"
+    assert any("total timeout" in warning.lower() for warning in report.warnings)
+
+
+@pytest.mark.asyncio
+async def test_deep_search_discards_claims_without_matching_evidence_ids():
+    async def search(query, limit):
+        return [Evidence(id="ev-1", content="current", source="official")]
+
+    class UnboundEvaluator:
+        async def evaluate(self, state):
+            return DeepSearchEvaluation(
+                claims=[Claim(text="unsupported", evidence_ids=["missing-evidence"])],
+            )
+
+    report = await run_deep_search(
+        DeepSearchRequest(query="claim grounding", worker="attractions"),
+        search=search,
+        evaluator=UnboundEvaluator(),
+    )
+
+    assert report.claims == []
+    assert any("unbound claim" in warning.lower() for warning in report.warnings)

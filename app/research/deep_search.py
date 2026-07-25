@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from app.agents.subagents.tool_policy import ToolPolicy
-from app.rag.evidence import find_conflicts, is_evidence_fresh
+from app.rag.evidence import is_evidence_fresh
 from app.schemas.planning import Evidence, ResearchTask, TaskType
 from app.schemas.research import Claim, ResearchConflict, ResearchReport
 
@@ -261,8 +261,23 @@ def _merge_conflicts(
     return merged
 
 
+def _ground_claims(claims: list[Claim], evidence: list[Evidence]) -> list[Claim]:
+    evidence_ids = {item.id for item in evidence if item.id}
+    return [
+        claim
+        for claim in claims
+        if claim.evidence_ids and set(claim.evidence_ids).issubset(evidence_ids)
+    ]
+
+
 def _status_for(state: DeepSearchState) -> str:
     if not state.evidence and state.warnings:
+        return "partial"
+    if any(
+        marker in warning.lower()
+        for warning in state.warnings
+        for marker in ("timeout", "stopped", "max rounds", "tool call limit")
+    ):
         return "partial"
     if state.missing_facts or state.conflicts:
         return "partial"
@@ -300,6 +315,7 @@ async def run_deep_search(
     max_rounds, max_tool_calls, timeout_seconds, limit_warnings = _limit_warnings(request)
     state.warnings.extend(limit_warnings)
     now = now or datetime.now(timezone.utc)
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
 
     policy = _policy_for(request)
     if not policy.allow_deep_research:
@@ -316,6 +332,10 @@ async def run_deep_search(
     last_evaluation = DeepSearchEvaluation()
 
     while state.rounds < max_rounds:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            state.warnings.append("Deep Search total timeout reached.")
+            break
         if state.tool_calls >= max_tool_calls:
             state.warnings.append("Deep Search stopped before follow-up because tool call limit was reached.")
             break
@@ -324,7 +344,12 @@ async def run_deep_search(
             break
 
         state.planned_queries.append(query)
-        found, warning = await _call_search(search, query, request.results_per_query, timeout_seconds)
+        found, warning = await _call_search(
+            search,
+            query,
+            request.results_per_query,
+            min(timeout_seconds, remaining),
+        )
         state.tool_calls += 1
         state.rounds += 1
         state.completed_queries.append(query)
@@ -341,12 +366,25 @@ async def run_deep_search(
         state.warnings.extend(normalize_warnings)
 
         try:
-            last_evaluation = await _call_evaluator(evaluator, state)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                state.warnings.append("Deep Search total timeout reached.")
+                break
+            last_evaluation = await asyncio.wait_for(
+                _call_evaluator(evaluator, state),
+                timeout=remaining,
+            )
+        except TimeoutError:
+            state.warnings.append("Deep Search total timeout reached.")
+            break
         except Exception as exc:
             state.warnings.append(f"Evaluation failed: {type(exc).__name__}.")
             last_evaluation = DeepSearchEvaluation()
 
-        state.claims = last_evaluation.claims
+        state.claims = _ground_claims(last_evaluation.claims, state.evidence)
+        dropped_claims = len(last_evaluation.claims) - len(state.claims)
+        if dropped_claims:
+            state.warnings.append(f"Dropped {dropped_claims} unbound claim(s).")
         state.summary = last_evaluation.summary
         state.missing_facts = last_evaluation.missing_facts
         state.conflicts = _merge_conflicts(last_evaluation.conflicts, state.evidence)
