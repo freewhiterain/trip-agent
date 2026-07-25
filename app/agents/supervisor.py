@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from operator import add
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
@@ -19,10 +18,14 @@ from langgraph.types import Send
 from pydantic import BaseModel, Field
 
 from app.agents.planner import create_research_plan, parallel_groups
-from app.agents.workers import WorkerRegistry, create_default_registry
+from app.agents.subagents.registry import create_default_subagent_registry
 from app.config import settings
+from app.governance.evidence import EvidenceGovernanceService
+from app.governance.events import TaskEventService
+from app.rag.identifiers import stable_hash
 from app.schemas.planning import (
     BudgetSummary,
+    CandidateOption,
     ItineraryDay,
     ResearchTask,
     TimeSlot,
@@ -30,8 +33,31 @@ from app.schemas.planning import (
     TravelRequirement,
     WorkerResult,
 )
-from app.governance.events import TaskEventService
+from app.schemas.research import EvidenceBoundCandidate, SubagentResponse
 from app.utils.logger import app_logger
+
+
+def _worker_result_mapping(value: Any) -> dict[str, dict[str, Any]]:
+    if not value:
+        return {}
+    if isinstance(value, list):
+        mapped: dict[str, dict[str, Any]] = {}
+        for item in value:
+            data = item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+            task_id = data.get("task_id")
+            if task_id:
+                mapped[task_id] = data
+        return mapped
+    if isinstance(value, dict) and "task_id" in value and "worker" in value:
+        return {str(value["task_id"]): dict(value)}
+    return {str(task_id): (payload.model_dump(mode="json") if hasattr(payload, "model_dump") else dict(payload)) for task_id, payload in dict(value).items()}
+
+
+def merge_worker_results(current: Any, incoming: Any) -> dict[str, dict[str, Any]]:
+    """LangGraph reducer that deterministically merges worker results by task id."""
+    merged = _worker_result_mapping(current)
+    merged.update(_worker_result_mapping(incoming))
+    return merged
 
 
 class SupervisorState(TypedDict, total=False):
@@ -40,7 +66,7 @@ class SupervisorState(TypedDict, total=False):
     groups: list[list[str]]
     group_index: int
     task: dict[str, Any]
-    worker_results: Annotated[list[dict[str, Any]], add]
+    worker_results: Annotated[dict[str, dict[str, Any]], merge_worker_results]
     itinerary: list[dict[str, Any]]
     budget: dict[str, Any]
     draft: dict[str, Any]
@@ -53,6 +79,121 @@ class SupervisorState(TypedDict, total=False):
 
 def _result_by_worker(results: list[WorkerResult], worker: str) -> WorkerResult | None:
     return next((r for r in results if r.worker == worker), None)
+
+
+def _candidate_to_option(candidate: EvidenceBoundCandidate, worker: str) -> CandidateOption:
+    return CandidateOption(
+        id=candidate.id or uuid4().hex,
+        name=candidate.name,
+        category=candidate.category or worker,
+        description=candidate.description,
+        estimated_cost=candidate.estimated_cost,
+        attributes=dict(candidate.attributes),
+        evidence_ids=candidate.evidence_ids,
+    )
+
+
+def _legacy_evidence_with_ids(result: WorkerResult):
+    id_remap: dict[str, str] = {}
+    normalized = []
+    for index, item in enumerate(result.evidence):
+        evidence_id = item.id or (
+            f"{result.task_id}-ev-"
+            f"{stable_hash(result.task_id, item.source, item.source_url or '', item.content, index)[:16]}"
+        )
+        if item.id:
+            id_remap[item.id] = evidence_id
+        normalized.append(item.model_copy(update={"id": evidence_id}))
+    return normalized, id_remap
+
+
+def _infer_legacy_option_evidence_ids(option: CandidateOption, evidence) -> list[str]:
+    if option.evidence_ids:
+        return option.evidence_ids
+    matches = []
+    option_name = option.name.strip().casefold()
+    option_source = str(option.attributes.get("source", "")).strip().casefold()
+    description = option.description.strip()
+    for item in evidence:
+        if item.id is None:
+            continue
+        source_matches = option_source and option_source == item.source.strip().casefold()
+        content_matches = (
+            (description and item.content.startswith(description))
+            or (len(option_name) >= 4 and option_name in item.content.casefold())
+        )
+        if source_matches and content_matches:
+            matches.append(item.id)
+    if matches:
+        return list(dict.fromkeys(matches))
+    if len(evidence) == 1 and evidence[0].id is not None:
+        return [evidence[0].id]
+    return []
+
+
+def _worker_result_to_subagent_response(result: WorkerResult) -> SubagentResponse:
+    evidence, id_remap = _legacy_evidence_with_ids(result)
+    return SubagentResponse(
+        task_id=result.task_id,
+        worker=result.worker,
+        status=result.status,
+        summary=result.summary,
+        candidates=[
+            EvidenceBoundCandidate(
+                id=option.id,
+                name=option.name,
+                category=option.category,
+                description=option.description,
+                estimated_cost=option.estimated_cost,
+                attributes=option.attributes,
+                evidence_ids=[
+                    id_remap.get(evidence_id, evidence_id)
+                    for evidence_id in _infer_legacy_option_evidence_ids(option, evidence)
+                ],
+            )
+            for option in result.options
+        ],
+        evidence=evidence,
+        warnings=result.warnings,
+    )
+
+
+def _subagent_response_to_worker_result(
+    response: SubagentResponse,
+    governance: EvidenceGovernanceService | None = None,
+    *,
+    is_mock: bool = False,
+) -> WorkerResult:
+    reviewed = (governance or EvidenceGovernanceService()).review([response])
+    summary = response.summary
+    if not summary and response.research_report is not None:
+        summary = response.research_report.summary
+    return WorkerResult(
+        task_id=response.task_id,
+        worker=response.worker,
+        status=response.status,
+        summary=summary,
+        options=[_candidate_to_option(candidate, response.worker) for candidate in reviewed.candidates],
+        evidence=reviewed.evidence,
+        warnings=reviewed.warnings,
+        is_mock=is_mock,
+    )
+
+
+def _coerce_subagent_response(result: Any, task: ResearchTask) -> SubagentResponse:
+    if isinstance(result, SubagentResponse):
+        return result
+    if isinstance(result, WorkerResult):
+        return _worker_result_to_subagent_response(result)
+    try:
+        return SubagentResponse.model_validate(result)
+    except Exception:
+        return _worker_result_to_subagent_response(WorkerResult.model_validate(result))
+
+
+def _worker_results_from_state(state: SupervisorState) -> list[WorkerResult]:
+    values = _worker_result_mapping(state.get("worker_results", {})).values()
+    return [WorkerResult.model_validate(value) for value in values]
 
 
 def build_itinerary(
@@ -197,13 +338,14 @@ def assemble_draft(
 
 
 def create_supervisor_graph(
-    registry: WorkerRegistry | None = None,
+    registry: Any | None = None,
     *,
     checkpointer=None,
     event_service: TaskEventService | None = None,
 ):
     """创建按依赖分组、组内并行的 LangGraph。"""
-    registry = registry or create_default_registry()
+    registry = registry or create_default_subagent_registry()
+    governance = EvidenceGovernanceService()
 
     async def emit(state: SupervisorState, event_type: str, payload: dict | None = None):
         if event_service is not None:
@@ -244,7 +386,7 @@ def create_supervisor_graph(
                 {
                     "requirement": state["requirement"],
                     "task": task,
-                    "worker_results": [],
+                    "worker_results": {},
                     "task_id": state["task_id"],
                     "user_id": state["user_id"],
                     "conversation_id": state.get("conversation_id"),
@@ -257,18 +399,31 @@ def create_supervisor_graph(
         requirement = TravelRequirement.model_validate(state["requirement"])
         task = ResearchTask.model_validate(state["task"])
         await emit(state, "worker_started", {"task_id": task.id, "worker": task.task_type})
-        result = await registry.run(task, requirement)
+        is_mock = False
+        try:
+            raw_result = await registry.run(task, requirement)
+            is_mock = isinstance(raw_result, WorkerResult) and raw_result.is_mock
+            response = _coerce_subagent_response(raw_result, task)
+        except Exception as exc:
+            response = SubagentResponse(
+                task_id=task.id,
+                worker=task.task_type,
+                status="failed",
+                summary="Domain subagent execution failed.",
+                warnings=[f"{type(exc).__name__}: {exc}"],
+            )
+        result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
         await emit(state, "worker_completed", result.model_dump(mode="json"))
         if result.evidence:
             await emit(state, "evidence_collected", {"task_id": task.id, "count": len(result.evidence)})
-        return {"worker_results": [result.model_dump(mode="json")]}
+        return {"worker_results": {task.id: result.model_dump(mode="json")}}
 
     async def advance_node(state: SupervisorState) -> dict[str, Any]:
         return {"group_index": state.get("group_index", 0) + 1}
 
     async def route_planner_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
-        results = [WorkerResult.model_validate(value) for value in state.get("worker_results", [])]
+        results = _worker_results_from_state(state)
         itinerary = build_itinerary(requirement, results)
         await emit(state, "route_planned", {"days": len(itinerary)})
         return {"itinerary": [day.model_dump(mode="json") for day in itinerary]}
@@ -281,7 +436,7 @@ def create_supervisor_graph(
 
     async def synthesizer_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
-        results = [WorkerResult.model_validate(value) for value in state.get("worker_results", [])]
+        results = _worker_results_from_state(state)
         template = [ItineraryDay.model_validate(value) for value in state.get("itinerary", [])]
         budget = BudgetSummary.model_validate(state["budget"])
         itinerary = await synthesize_itinerary_with_llm(requirement, results, template)
@@ -315,7 +470,7 @@ def create_supervisor_graph(
 
 async def run_travel_planning(
     requirement: TravelRequirement,
-    registry: WorkerRegistry | None = None,
+    registry: Any | None = None,
     *,
     checkpointer=None,
     event_service: TaskEventService | None = None,
@@ -330,7 +485,7 @@ async def run_travel_planning(
         result = await graph.ainvoke(
             {
                 "requirement": requirement.model_dump(mode="json"),
-                "worker_results": [],
+                "worker_results": {},
                 "warnings": [],
                 "task_id": task_id,
                 "user_id": user_id,

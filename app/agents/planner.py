@@ -51,7 +51,6 @@ def create_research_plan(requirement: TravelRequirement) -> list[ResearchTask]:
                 query=query,
                 required_tools=tools,
                 completion_criteria=common_criteria,
-                dependencies=[attractions_task.id],
             )
             for task_type, query, tools in dependent_definitions
         ),

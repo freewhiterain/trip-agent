@@ -29,7 +29,7 @@ def test_requirement_rejects_invalid_trip():
         make_requirement(days=0)
 
 
-def test_planner_creates_dag_with_two_parallel_groups():
+def test_planner_creates_single_parallel_group_for_confirmed_destination():
     tasks = create_research_plan(make_requirement())
 
     assert {task.task_type for task in tasks} == {
@@ -40,11 +40,11 @@ def test_planner_creates_dag_with_two_parallel_groups():
         "weather",
     }
     assert len({task.id for task in tasks}) == 5
+    assert all(task.dependencies == [] for task in tasks)
 
     groups = parallel_groups(tasks)
     assert [{task.task_type for task in group} for group in groups] == [
-        {"attractions", "weather"},
-        {"transport", "hotel", "food"},
+        {"attractions", "transport", "hotel", "food", "weather"},
     ]
 
 
