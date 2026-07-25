@@ -3,6 +3,7 @@ MCP 客户端管理器
 管理所有 MCP 服务连接
 """
 import asyncio
+from collections.abc import Collection
 from typing import Optional
 from app.utils.logger import app_logger
 
@@ -63,6 +64,27 @@ class MCPClientManager:
         except Exception as e:
             app_logger.error(f"❌ 获取 MCP 工具失败: {e}")
             return []
+
+    async def get_allowed_tools(self, allowed_providers: Collection[str]) -> list:
+        """Return only known read-only MCP tools for the requested providers."""
+        provider_tool_names = {
+            "weather_mcp": {"get_weather"},
+            "transport_mcp": {"get_transport"},
+            "hotel_mcp": {"search_hotels", "get_hotel_availability"},
+            "search_mcp": {"web_search"},
+        }
+        allowed_names = {
+            name
+            for provider in allowed_providers
+            for name in provider_tool_names.get(provider, set())
+        }
+        if not allowed_names:
+            return []
+        return [
+            tool
+            for tool in await self.get_tools()
+            if getattr(tool, "name", None) in allowed_names
+        ]
 
 
 async def get_mcp_client() -> MCPClientManager:
