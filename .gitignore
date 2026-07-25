@@ -65,5 +65,8 @@ tests/*.md
 # Claude Code 本地配置（不上传）
 .claude/
 
+# Codex implementation worktrees
+.worktrees/
+
 # Playwright 浏览器二进制（体积大，按需本地安装）
 .playwright-browsers/
