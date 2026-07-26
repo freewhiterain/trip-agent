@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.agents.supervisor import run_travel_planning
 from app.api.dependencies import get_current_user
 from app.core.checkpointer import get_checkpointer
-from app.governance.events import TaskEventService
+from app.governance.events import PublishingEventRepository, TaskEventService, task_event_to_sse_event
 from app.governance.postgres import PostgresEventRepository
 from app.governance.tool_invocations import PostgresToolInvocationRepository
 from app.models.base import async_session_maker
@@ -163,10 +163,17 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
             payload=payload or {},
         ).legacy_payload()
 
+    def research_event_frame(research_event: SSEEvent) -> str:
+        nonlocal sequence
+        sequence += 1
+        research_event.sequence = sequence
+        return sse(research_event.legacy_payload())
+
     claim_version = None
     repository = None
     heartbeat_task = None
     planning_task = None
+    research_event_task = None
     processing_guard = None
     try:
         repository = PostgresToolInvocationRepository()
@@ -224,7 +231,16 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
         claim_version = claim.claim_version
         record = claim.record
         requirement = TravelRequirement(**data.result.model_dump())
-        event_service = TaskEventService(PostgresEventRepository())
+        research_events: asyncio.Queue[SSEEvent] = asyncio.Queue()
+
+        async def publish_research_event(task_event):
+            research_event = task_event_to_sse_event(task_event)
+            if research_event is not None:
+                await research_events.put(research_event)
+
+        event_service = TaskEventService(
+            PublishingEventRepository(PostgresEventRepository(), publish_research_event)
+        )
         lease_lost = asyncio.Event()
         heartbeat_task = asyncio.create_task(
             processing_heartbeat(
@@ -249,18 +265,36 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
             name=f"tool-result-planning:{call_id}",
         )
         try:
-            done, _pending = await asyncio.wait(
-                {planning_task, heartbeat_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if heartbeat_task in done and lease_lost.is_set():
-                await cancel_and_await_task(planning_task)
-                planning_task = None
-                await stop_processing_heartbeat(heartbeat_task)
-                heartbeat_task = None
-                raise ProcessingLeaseLostError("processing lease lost")
-            draft = planning_task.result()
+            while True:
+                research_event_task = asyncio.create_task(
+                    research_events.get(),
+                    name=f"tool-result-research-event:{call_id}",
+                )
+                done, _pending = await asyncio.wait(
+                    {planning_task, heartbeat_task, research_event_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if research_event_task in done:
+                    yield research_event_frame(research_event_task.result())
+                    research_event_task = None
+                    continue
+
+                await cancel_and_await_task(research_event_task)
+                research_event_task = None
+                if heartbeat_task in done and lease_lost.is_set():
+                    await cancel_and_await_task(planning_task)
+                    planning_task = None
+                    await stop_processing_heartbeat(heartbeat_task)
+                    heartbeat_task = None
+                    raise ProcessingLeaseLostError("processing lease lost")
+                if planning_task in done:
+                    draft = planning_task.result()
+                    break
+            while not research_events.empty():
+                yield research_event_frame(research_events.get_nowait())
         finally:
+            await cancel_and_await_task(research_event_task)
+            research_event_task = None
             if planning_task is not None and planning_task.done():
                 planning_task = None
             await stop_processing_heartbeat(heartbeat_task)

@@ -19,6 +19,12 @@ SSEType = Literal[
     "done",
     "tool_call",
     "tool_result",
+    "subagent_started",
+    "subagent_completed",
+    "evidence_collected",
+    "subagent_tool_call",
+    "follow_up_search",
+    "research_conflict",
 ]
 
 

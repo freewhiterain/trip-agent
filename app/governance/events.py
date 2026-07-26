@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.schemas.governance import TaskEventRecord
+from app.schemas.events import SSEEvent
 
 
 class EventRepository(Protocol):
@@ -53,6 +54,109 @@ class TaskEventService:
                 payload=payload or {},
             )
         )
+
+
+_PUBLIC_RESEARCH_EVENT_TYPES = {
+    "worker_started": "subagent_started",
+    "subagent_started": "subagent_started",
+    "worker_completed": "subagent_completed",
+    "subagent_completed": "subagent_completed",
+    "evidence_collected": "evidence_collected",
+    "subagent_tool_called": "subagent_tool_call",
+    "tool_called": "subagent_tool_call",
+    "follow_up_search": "follow_up_search",
+    "follow_up_search_started": "follow_up_search",
+    "research_conflict": "research_conflict",
+    "research_conflict_detected": "research_conflict",
+    "conflict_detected": "research_conflict",
+}
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _warning_code(warning: str) -> str:
+    value = warning.lower()
+    if "max round" in value:
+        return "max_rounds"
+    if "tool call" in value:
+        return "tool_call_limit"
+    if "timeout" in value:
+        return "timeout"
+    if "duplicate" in value:
+        return "duplicate_follow_up"
+    if "conflict" in value:
+        return "conflict"
+    if "unbound" in value:
+        return "unbound_claim"
+    if "search failed" in value:
+        return "search_failed"
+    if "provider" in value or "unavailable" in value:
+        return "provider_unavailable"
+    return "warning"
+
+
+def _warning_codes(payload: dict[str, Any]) -> list[str]:
+    explicit = payload.get("warning_codes")
+    if isinstance(explicit, list):
+        return _dedupe([str(value) for value in explicit])
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list):
+        return _dedupe([_warning_code(str(value)) for value in warnings])
+    return []
+
+
+def _count_from_payload(payload: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, list):
+            return len(value)
+    return None
+
+
+def _public_research_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    public: dict[str, Any] = {}
+    for key in ("task_id", "worker"):
+        if payload.get(key) is not None:
+            public[key] = payload[key]
+    tool_name = payload.get("tool_name") or payload.get("tool")
+    if tool_name is not None and event_type in {"subagent_tool_call", "follow_up_search"}:
+        public["tool_name"] = tool_name
+    round_number = payload.get("round_number", payload.get("round"))
+    if round_number is not None and event_type in {"subagent_tool_call", "follow_up_search"}:
+        public["round_number"] = round_number
+    if payload.get("status") is not None and event_type == "subagent_completed":
+        public["status"] = payload["status"]
+
+    evidence_count = _count_from_payload(payload, "evidence_count", "count", "evidence")
+    if evidence_count is not None and event_type in {"evidence_collected", "subagent_completed"}:
+        public["evidence_count"] = evidence_count
+
+    conflict_count = _count_from_payload(payload, "conflict_count", "conflicts", "count")
+    if conflict_count is not None and event_type in {"research_conflict", "subagent_completed"}:
+        public["conflict_count"] = conflict_count
+
+    warning_codes = _warning_codes(payload)
+    if warning_codes and event_type == "subagent_completed":
+        public["warning_codes"] = warning_codes
+    return public
+
+
+def task_event_to_sse_event(event: TaskEventRecord) -> SSEEvent | None:
+    """Map durable task events to public SSE metadata without reasoning or evidence text."""
+    sse_type = _PUBLIC_RESEARCH_EVENT_TYPES.get(event.event_type)
+    if sse_type is None:
+        return None
+    return SSEEvent(
+        type=sse_type,
+        task_id=event.task_id,
+        conversation_id=event.conversation_id,
+        sequence=event.sequence,
+        payload=_public_research_payload(sse_type, event.payload),
+    )
 
 
 class PublishingEventRepository:
