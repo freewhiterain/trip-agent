@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from datetime import date
-import inspect
 from typing import Any
 
 from app.agents.factory import create_planning_registry
 from app.schemas.planning import ResearchTask, TaskType, TravelRequirement
 from app.schemas.research import SubagentResponse
 from app.schemas.tools import AgentToolCall, AgentToolName, AgentToolResult
+from app.utils.callables import supports_keyword
 from app.utils.logger import app_logger
 
 
@@ -59,7 +59,7 @@ class AgentToolRegistry:
         )
 
         try:
-            if event_callback is not None and _supports_keyword(self.registry.run, "event_callback"):
+            if event_callback is not None and supports_keyword(self.registry.run, "event_callback"):
                 response = await self.registry.run(
                     task,
                     requirement,
@@ -133,17 +133,6 @@ async def run_agent_tool(
     return await AgentToolRegistry(registry=registry).invoke(
         call,
         event_callback=event_callback,
-    )
-
-
-def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return False
-    return keyword in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
     )
 
 

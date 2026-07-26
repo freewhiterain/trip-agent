@@ -27,6 +27,7 @@ from app.schemas.research import (
     ResearchReport,
     SubagentResponse,
 )
+from app.utils.callables import supports_keyword
 
 
 ToolBuilder = Callable[[TaskType], Awaitable[Iterable[Any]] | Iterable[Any]]
@@ -51,17 +52,6 @@ def _normalize_number(token: str) -> str:
     except ValueError:
         return token
     return str(int(value)) if value == int(value) else token
-
-
-def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return False
-    return keyword in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
 
 
 class SubagentAnalysis(BaseModel):
@@ -511,7 +501,7 @@ class DomainSubagent:
                 update={"query": self._conflict_query(task.query, conflicts)}
             )
         kwargs: dict[str, Any] = {"search": search}
-        if event_callback is not None and _supports_keyword(self._deep_search, "event_callback"):
+        if event_callback is not None and supports_keyword(self._deep_search, "event_callback"):
             kwargs["event_callback"] = deep_search_event
         return await self._deep_search(request, **kwargs)
 

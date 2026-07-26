@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -15,17 +14,7 @@ from app.agents.subagents.transport import TransportSubagent
 from app.agents.subagents.weather import WeatherSubagent
 from app.schemas.planning import ResearchTask, TaskType, TravelRequirement
 from app.schemas.research import SubagentResponse
-
-
-def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return False
-    return keyword in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
+from app.utils.callables import supports_keyword
 
 
 class SubagentRegistry:
@@ -55,7 +44,7 @@ class SubagentRegistry:
                 warnings=["subagent_error:worker_unregistered"],
             )
         try:
-            if event_callback is not None and _supports_keyword(worker.run, "event_callback"):
+            if event_callback is not None and supports_keyword(worker.run, "event_callback"):
                 return await worker.run(task, requirement, event_callback=event_callback)
             return await worker.run(task, requirement)
         except Exception as exc:

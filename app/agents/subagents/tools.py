@@ -13,6 +13,7 @@ from app.config import settings
 from app.mcp_core.client import get_mcp_client
 from app.schemas.planning import Evidence, TaskType
 from app.schemas.events import EvidenceSufficiency
+from app.utils.logger import app_logger
 
 
 class ProviderError(BaseModel):
@@ -148,12 +149,51 @@ def normalize_tool_result(provider: str, payload: Any) -> NormalizedToolResult:
     return _normalized(provider, evidence, status=provider_status)
 
 
+async def _graph_evidence(
+    graph: Any,
+    destination: str,
+    category: Any,
+    query: str,
+) -> list[Any]:
+    """查图谱关系；失败只降级为"没有图谱补充"，不影响文档证据。
+
+    图谱是补充信号：库里没数据、表还没建、连接抖动都属于常态。让它把整个
+    local_rag provider 打成 failed，会连带触发不必要的 Deep Search 补搜。
+    """
+    if graph is None:
+        return []
+    try:
+        return list(await graph.search_related_entities(destination, category, query))
+    except Exception as exc:
+        app_logger.warning(f"图谱证据不可用，仅使用文档证据：{type(exc).__name__}: {exc}")
+        return []
+
+
+def _merge_evidence(document_evidence: Any, graph_evidence: list[Any]) -> list[Any]:
+    """文档证据在前，图谱补在后；按 content 去重。
+
+    同一句话可能既在原文里又被 graph_extraction 抽成关系，去重避免它在 LLM
+    prompt 的证据清单里出现两遍（重复证据会让模型误判该事实更可信）。
+    """
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for item in [*list(document_evidence or []), *graph_evidence]:
+        content = getattr(item, "content", None)
+        key = content if isinstance(content, str) else repr(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
 async def build_subagent_tools(
     worker: TaskType,
     policy: "ToolPolicy | None" = None,
     *,
     mcp_manager: Any | None = None,
     knowledge: Any | None = None,
+    graph: Any | None = None,
     weather_adapter: Any | None = None,
     search_adapter: Any | None = None,
     deep_research_service: Any | None = None,
@@ -195,13 +235,20 @@ async def build_subagent_tools(
         if knowledge is None:
             from app.agents.workers.local_knowledge import get_local_knowledge_service
             knowledge = get_local_knowledge_service()
+        if graph is None:
+            from app.agents.workers.graph_knowledge import get_graph_knowledge_service
+            graph = get_graph_knowledge_service()
 
         async def invoke_rag(payload: Mapping[str, Any]) -> Any:
-            return knowledge.search_destination(
-                str(payload["destination"]),
-                payload.get("category", worker),
-                str(payload["query"]),
-            )
+            destination = str(payload["destination"])
+            category = payload.get("category", worker)
+            query = str(payload["query"])
+            document_evidence = knowledge.search_destination(destination, category, query)
+            # 图谱与文档互补：不新增 provider 塞进 provider_order（那是降级链，
+            # local_rag 一命中后面就 break，图谱永远轮不到），而是在这里合并，
+            # 语义与旧路径 workers/attractions.py 的 [*doc, *graph] 保持一致。
+            graph_evidence = await _graph_evidence(graph, destination, category, query)
+            return _merge_evidence(document_evidence, graph_evidence)
 
         tools.append(ReadOnlyTool(name="local_rag", provider="local_rag", _handler=invoke_rag))
 

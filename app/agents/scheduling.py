@@ -65,14 +65,14 @@ def schedule_itinerary(
 
         day_notes: list[str] = []
         if not selected:
-            day_notes.append(f"No unused attraction candidate remains for day {offset + 1}.")
+            day_notes.append(f"第{offset + 1}天已无未使用的景点候选。")
         morning = (
             _slot_from_option("morning", selected[0])
             if selected
             else TimeSlot(
                 period="morning",
-                title=f"{requirement.destination} flexible area time",
-                description="No evidence-backed attraction remains for this period.",
+                title=f"{requirement.destination}分区自由活动",
+                description="该时段没有留下带证据的景点候选。",
             )
         )
         afternoon = (
@@ -80,8 +80,8 @@ def schedule_itinerary(
             if len(selected) > 1
             else TimeSlot(
                 period="afternoon",
-                title="Flexible local time",
-                description="No second evidence-backed attraction was available.",
+                title="自由活动",
+                description="没有第二个带证据的景点候选可安排。",
             )
         )
         evening = (
@@ -89,8 +89,8 @@ def schedule_itinerary(
             if foods
             else TimeSlot(
                 period="evening",
-                title="Flexible dinner time",
-                description="No evidence-backed food candidate was available.",
+                title="自由安排晚餐",
+                description="没有带证据的餐饮候选可安排。",
             )
         )
         itinerary.append(
@@ -146,13 +146,13 @@ def calculate_budget(
     }
     known_costs = [value for value in categories.values() if value is not None]
     notes = [
-        "Budget includes only candidate prices supported by research evidence.",
-        "Missing categories are excluded from the total estimate.",
+        "预算只累加有研究证据支撑的候选价格。",
+        "缺失的类别不计入总估算。",
     ]
     if requirement.budget is not None:
-        notes.insert(0, f"User budget limit: {requirement.budget:.2f} CNY.")
+        notes.insert(0, f"用户预算上限：{requirement.budget:.2f} 元。")
     else:
-        notes.insert(0, "No explicit user budget was provided.")
+        notes.insert(0, "用户未提供明确预算。")
     return BudgetSummary(
         total_estimate=float(sum(known_costs)) if known_costs else None,
         categories=categories,

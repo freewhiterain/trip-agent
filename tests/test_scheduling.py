@@ -55,7 +55,7 @@ def test_scheduler_uses_distinct_grounded_places_and_preserves_constraints():
     assert itinerary[0].slots[0].travel_minutes == 20
     assert itinerary[0].slots[0].opening_window == "09:00-17:00"
     assert itinerary[1].slots[0].title not in {"Panda Base", "Wenshu"}
-    assert itinerary[1].notes == ["No unused attraction candidate remains for day 2."]
+    assert itinerary[1].notes == ["第2天已无未使用的景点候选。"]
     assert warnings == []
 
 
@@ -85,4 +85,6 @@ def test_budget_sums_grounded_prices_and_marks_missing_categories():
         "misc": None,
     }
     assert budget.total_estimate == 700.0
-    assert any("budget" in note.lower() for note in budget.notes)
+    # 文案面向终端用户，必须和 render_plan_markdown 的中文正文同语言。
+    assert any("预算" in note for note in budget.notes)
+    assert any("800.00 元" in note for note in budget.notes)

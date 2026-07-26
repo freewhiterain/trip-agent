@@ -75,7 +75,22 @@ async def _load_recent_context(
         .limit(_RECENT_CONTEXT_LIMIT)
     )
     messages = list(reversed(result.scalars().all()))
-    return [{"role": message.role, "content": message.content} for message in messages]
+    return [_context_item(message) for message in messages]
+
+
+def _context_item(message: Message) -> dict[str, str]:
+    """把一条历史消息压成路由器要看的最小结构。
+
+    带上 extra_info["kind"]：主动邀请的识别靠这个结构化标记，只传 content 的话
+    MainAgentService 只能拿问候语文案做全等比较，改一个字整条"好的 → 开始规划"
+    就静默失效。extra_info 在模型上是 Python 侧 default=dict，历史行可能是
+    NULL，所以要判类型而不是直接 .get。
+    """
+    item = {"role": message.role, "content": message.content}
+    extra_info = getattr(message, "extra_info", None)
+    if isinstance(extra_info, dict) and extra_info.get("kind"):
+        item["kind"] = str(extra_info["kind"])
+    return item
 
 
 async def generate_sse_stream(

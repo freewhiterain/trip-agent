@@ -23,6 +23,12 @@ class CacheEntry:
     expires_at: float
 
 
+# 缓存条目上限。search 的 cache_key 里带完整 query 文本
+# （tavily:{query}:{max_results}），用户输入的多样性会直接变成常驻内存，
+# 因此必须有上界而不只是靠 TTL 过期。
+_MAX_CACHE_ENTRIES = 512
+
+
 class ResilientExecutor:
     """为幂等只读调用提供单进程可靠性保护。"""
 
@@ -53,6 +59,31 @@ class ResilientExecutor:
             return
         raise CircuitOpenError("外部服务熔断器处于开启状态")
 
+    def _cached_value(self, cache_key: str, now: float) -> tuple[bool, Any]:
+        entry = self._cache.get(cache_key)
+        if entry is None:
+            return False, None
+        if entry.expires_at <= now:
+            # 顺手清掉自己这条过期项，避免只读路径上留垃圾。
+            self._cache.pop(cache_key, None)
+            return False, None
+        return True, entry.value
+
+    def _store(self, cache_key: str, value: Any, ttl_seconds: float) -> None:
+        now = time.monotonic()
+        self._cache[cache_key] = CacheEntry(value, now + ttl_seconds)
+        if len(self._cache) <= _MAX_CACHE_ENTRIES:
+            return
+        # 先回收所有已过期的条目；只有仍然放不下时才按最早到期的顺序淘汰。
+        for key in [key for key, entry in self._cache.items() if entry.expires_at <= now]:
+            self._cache.pop(key, None)
+        if len(self._cache) <= _MAX_CACHE_ENTRIES:
+            return
+        for key, _entry in sorted(self._cache.items(), key=lambda item: item[1].expires_at)[
+            : len(self._cache) - _MAX_CACHE_ENTRIES
+        ]:
+            self._cache.pop(key, None)
+
     async def execute(
         self,
         cache_key: str,
@@ -60,21 +91,27 @@ class ResilientExecutor:
         *,
         ttl_seconds: float,
     ) -> Any:
+        # 先查缓存再查熔断：缓存的意义恰恰是上游挂掉时还能答上来。原先顺序相反，
+        # 熔断期间连手上已有、还没过期的答案都返回不了；而熔断器是全局的，
+        # 天气连挂三次会让另一个 key 上完全健康的搜索缓存一起被拒。
+        hit, value = self._cached_value(cache_key, time.monotonic())
+        if hit:
+            return value
         self._check_circuit()
-        now = time.monotonic()
-        cached = self._cache.get(cache_key)
-        if cached and cached.expires_at > now:
-            return cached.value
 
         async with self._lock:
             existing = self._inflight.get(cache_key)
-            if existing is None:
+            if existing is None or existing.done():
+                # 已结束的任务一律不复用。等待方被取消时（SSE 断开、上层超时都是
+                # 常态），下面的 finally 往往在被 shield 的任务结束前就跑完了，
+                # 于是摘不掉；等它随后失败就永久留在表里，把**上一次**的错误重放给
+                # 后来者——目标服务可能早已恢复，真正的操作一次都不会执行。
                 existing = asyncio.create_task(self._execute_with_retry(operation))
                 self._inflight[cache_key] = existing
 
         try:
             value = await asyncio.shield(existing)
-            self._cache[cache_key] = CacheEntry(value, time.monotonic() + ttl_seconds)
+            self._store(cache_key, value, ttl_seconds)
             return value
         finally:
             async with self._lock:

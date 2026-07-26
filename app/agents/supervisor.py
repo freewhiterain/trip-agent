@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import inspect
-from datetime import timedelta
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
@@ -31,12 +29,12 @@ from app.schemas.planning import (
     CandidateOption,
     ItineraryDay,
     ResearchTask,
-    TimeSlot,
     TravelPlanDraft,
     TravelRequirement,
     WorkerResult,
 )
 from app.schemas.research import EvidenceBoundCandidate, SubagentResponse
+from app.utils.callables import supports_keyword
 from app.utils.logger import app_logger
 
 
@@ -79,10 +77,6 @@ class SupervisorState(TypedDict, total=False):
     task_id: str
     user_id: str
     conversation_id: str | None
-
-
-def _result_by_worker(results: list[WorkerResult], worker: str) -> WorkerResult | None:
-    return next((r for r in results if r.worker == worker), None)
 
 
 def _candidate_to_option(candidate: EvidenceBoundCandidate, worker: str) -> CandidateOption:
@@ -232,17 +226,6 @@ def _coerce_subagent_response(result: Any, task: ResearchTask) -> SubagentRespon
         return _worker_result_to_subagent_response(WorkerResult.model_validate(result))
 
 
-def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return False
-    return keyword in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-
-
 def _worker_results_from_state(state: SupervisorState) -> list[WorkerResult]:
     values = _worker_result_mapping(state.get("worker_results", {})).values()
     return [WorkerResult.model_validate(value) for value in values]
@@ -253,74 +236,6 @@ def _subagent_responses_from_state(state: SupervisorState) -> list[SubagentRespo
     if response_values:
         return [SubagentResponse.model_validate(value) for value in response_values.values()]
     return [_worker_result_to_subagent_response(result) for result in _worker_results_from_state(state)]
-
-
-def _legacy_build_itinerary(
-    requirement: TravelRequirement,
-    results: list[WorkerResult],
-) -> list[ItineraryDay]:
-    """确定性路线编排：把候选项轮转分配到逐日时段。
-
-    真实地理聚类与营业时间校验需要地图数据接入；当前按候选项轮转并明确标注。
-    """
-    attractions_result = _result_by_worker(results, "attractions")
-    food_result = _result_by_worker(results, "food")
-    attractions = attractions_result.options if attractions_result else []
-    foods = food_result.options if food_result else []
-
-    itinerary = []
-    for offset in range(requirement.days):
-        morning_title = (
-            attractions[offset % len(attractions)].name
-            if attractions
-            else f"{requirement.destination}分区游览"
-        )
-        evening_title = foods[offset % len(foods)].name if foods else "自由安排晚餐"
-        itinerary.append(
-            ItineraryDay(
-                day=offset + 1,
-                date=requirement.departure_date + timedelta(days=offset),
-                slots=[
-                    TimeSlot(
-                        period="morning",
-                        title=morning_title,
-                        description="根据已验证资料安排同一区域活动，减少折返；地理聚类待地图数据接入后精确化。",
-                    ),
-                    TimeSlot(
-                        period="afternoon",
-                        title="文化或休闲活动",
-                        description="具体场所需在实时开放信息接入后确认。",
-                    ),
-                    TimeSlot(
-                        period="evening",
-                        title=evening_title,
-                        description="结合饮食偏好选择，营业状态与价格需实时确认。",
-                    ),
-                ],
-            )
-        )
-    return itinerary
-
-
-def _legacy_build_budget(requirement: TravelRequirement) -> BudgetSummary:
-    """确定性预算汇总：只做用户输入的算术拆分，不虚构价格。"""
-    notes = ["实时价格数据接入前不生成虚假费用估算。"]
-    if requirement.budget:
-        per_day = requirement.budget / requirement.days
-        notes.insert(0, f"用户预算上限：{requirement.budget:.2f} 元，折合每天约 {per_day:.0f} 元。")
-    else:
-        notes.insert(0, "用户未提供明确预算。")
-    return BudgetSummary(
-        total_estimate=None,
-        categories={
-            "transport": None,
-            "accommodation": None,
-            "food": None,
-            "attractions": None,
-            "misc": None,
-        },
-        notes=notes,
-    )
 
 
 class _LLMItinerary(BaseModel):
@@ -490,7 +405,7 @@ def create_supervisor_graph(
         is_mock = False
         response: SubagentResponse | None = None
         try:
-            if _supports_keyword(registry.run, "event_callback"):
+            if supports_keyword(registry.run, "event_callback"):
                 raw_result = await registry.run(
                     task,
                     requirement,

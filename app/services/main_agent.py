@@ -41,6 +41,9 @@ _AGENT_TOOL_WORKER_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("food", ("\u7f8e\u98df", "\u5403", "\u9910\u5385", "\u5c0f\u5403", "\u83dc")),
 )
 _PROACTIVE_OFFER = "需要我帮你规划一下旅行吗"
+# 与 app/api/v1/conversations.py 写入的 extra_info["kind"] 对应，
+# 由 chat._load_recent_context 带进 context。
+_OFFER_KIND = "conversation_offer"
 
 
 class MainAgentService:
@@ -135,13 +138,24 @@ class MainAgentService:
 
     @staticmethod
     def _has_recent_proactive_offer(context: list[dict[str, Any]]) -> bool:
+        """判断上一条非系统消息是否就是那句主动邀请。
+
+        优先认结构化标记 extra_info["kind"] == "conversation_offer"（生产者
+        app/api/v1/conversations.py 建会话时就打上了）。原先只做文案全等比较，
+        问候语改一个字就会让"好的"不再进入规划流程，且无任何报错。
+
+        文案兜底必须保留：这次改动之前入库的会话行没有 kind 标记，去掉兜底会让
+        所有老会话的确认路径突然失效。兜底保持全等而不是子串——"需要我帮你规划
+        一下旅行吗？现在开始吧。"是另一句话，不该被当成待确认的邀请。
+        """
         for item in reversed(context):
             if item.get("role") == "system":
                 continue
-            return (
-                item.get("role") == "assistant"
-                and MainAgentService._normalize(str(item.get("content", ""))) == _PROACTIVE_OFFER
-            )
+            if item.get("role") != "assistant":
+                return False
+            if item.get("kind") == _OFFER_KIND:
+                return True
+            return MainAgentService._normalize(str(item.get("content", ""))) == _PROACTIVE_OFFER
         return False
 
     def _llm_enabled(self) -> bool:

@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.agents import factory as agent_factory
 from app.api.dependencies import get_current_user
 from app.core.checkpointer import get_checkpointer
+from app.governance.drafts import PostgresDraftRepository, save_trip_draft
 from app.governance.events import PublishingEventRepository, TaskEventService, task_event_to_sse_event
 from app.governance.postgres import PostgresEventRepository
 from app.governance.tool_invocations import PostgresToolInvocationRepository
@@ -22,6 +23,7 @@ from app.schemas.planning import TravelRequirement
 from app.schemas.tools import ToolResultRequest
 from app.services.open_qa import answer_open_question
 from app.services.planning import render_plan_markdown
+from app.utils.logger import app_logger
 
 
 router = APIRouter(prefix="/chat/tools", tags=["chat tools"])
@@ -349,6 +351,23 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
                     )
                 )
         claim_version = None
+        # 前端只走这条链路，草稿必须在这里落库：/planning/tasks 才是原先唯一
+        # 调用 save_trip_draft 的地方，而 UI 从不访问它，于是
+        # GET /planning/drafts/{cid} 永远 404，chat 的多轮上下文也拿不到
+        # 上一版行程。落库失败不能吞掉已经算好的结果，因此单独 try。
+        if finished.conversation_id:
+            try:
+                await save_trip_draft(
+                    PostgresDraftRepository(),
+                    user_id,
+                    finished.conversation_id,
+                    draft,
+                )
+            except Exception as exc:
+                app_logger.warning(
+                    f"行程草稿持久化失败，本次结果仍照常返回: task_id={call_id} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
         yield sse(event("result", {"task_id": call_id, "status": "completed", "result": assistant_result}))
         yield sse(event("token", {"content": assistant_content}))
         yield sse(event("done"))

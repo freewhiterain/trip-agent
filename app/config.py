@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # ============== LangSmith 配置 ==============
     langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")
     langsmith_project: str = Field(default="travel-planner-dev", alias="LANGSMITH_PROJECT")
-    langsmith_tracing: bool = Field(default=True, alias="LANGSMITH_TRACING")
+    langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
     langsmith_endpoint: str = Field(
         default="https://api.smith.langchain.com",
         alias="LANGSMITH_ENDPOINT"
@@ -97,6 +97,30 @@ class Settings(BaseSettings):
             and self.jwt_secret_key == "development-only-change-me"
         ):
             raise RuntimeError("生产环境必须配置独立的 JWT_SECRET_KEY")
+
+    def apply_langsmith_env(self) -> bool:
+        """把 LangSmith 配置导出到 os.environ，返回追踪是否真的开启。
+
+        pydantic-settings 只把 .env 读进 Settings 对象，不写回 os.environ；而
+        langsmith SDK 只认 os.environ。所以在这之前这四个配置项是死的——
+        .env 里写了 LANGSMITH_TRACING=true 也不会有任何一条 trace 上报，
+        排查链路时看不到 Agent 调用轨迹却完全没有报错提示。
+
+        没有 API Key 就不开：开了只会让每次 LLM 调用多一轮注定 401 的上报。
+        """
+        if not (self.langsmith_tracing and self.langsmith_api_key):
+            return False
+        # LANGSMITH_* 是新名字，LANGCHAIN_* 是 langchain-core 仍在读的旧名字，
+        # 两套都写以免版本差异导致静默不生效。
+        os.environ["LANGSMITH_TRACING"] = "true"
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGSMITH_API_KEY"] = self.langsmith_api_key
+        os.environ["LANGCHAIN_API_KEY"] = self.langsmith_api_key
+        os.environ["LANGSMITH_PROJECT"] = self.langsmith_project
+        os.environ["LANGCHAIN_PROJECT"] = self.langsmith_project
+        os.environ["LANGSMITH_ENDPOINT"] = self.langsmith_endpoint
+        os.environ["LANGCHAIN_ENDPOINT"] = self.langsmith_endpoint
+        return True
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),

@@ -20,6 +20,12 @@ async def lifespan(app: FastAPI):
 
     settings.validate_security()
 
+    # LangSmith 只读 os.environ，pydantic-settings 不会写回去，必须显式导出。
+    if settings.apply_langsmith_env():
+        app_logger.info(f"LangSmith 追踪已启用: project={settings.langsmith_project}")
+    elif settings.langsmith_tracing:
+        app_logger.warning("LANGSMITH_TRACING=true 但缺少 LANGSMITH_API_KEY，追踪未启用")
+
     loop = asyncio.get_running_loop()
     app_logger.info(f"FastAPI 使用的事件循环: {type(loop).__name__}")
 
