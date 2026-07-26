@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.agents.factory import create_planning_registry
 from app.config import settings
+from app.governance.drafts import PostgresDraftRepository
 from app.utils.logger import app_logger
 from app.api.v1 import conversations, chat, planning, tools, users
 
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
             planning_registry, planning_fallback_reason = create_planning_registry()
             app.state.planning_registry = planning_registry
             app.state.planning_fallback_reason = planning_fallback_reason
+            app.state.draft_repository = PostgresDraftRepository()
             app_logger.info("MCP 服务初始化完成")
 
             yield

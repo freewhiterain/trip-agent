@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
 from app.agents.agent_tools import run_agent_tool
+from app.governance.drafts import load_trip_draft_context
 from app.governance.tool_invocations import PostgresToolInvocationRepository, ToolInvocationRecord
 from app.models.base import async_session_maker, get_db
 from app.models.conversation import Conversation
@@ -82,6 +83,7 @@ async def generate_sse_stream(
     user_message: str,
     user_id: str,
     registry=None,
+    draft_repository=None,
 ):
     """Save one user turn, decide once, and stream its explicit action."""
     task_id = uuid4().hex
@@ -102,6 +104,27 @@ async def generate_sse_stream(
         async with async_session_maker() as db:
             saved_user_message = await save_message(db, conversation_id, "user", user_message)
             context = await _load_recent_context(db, conversation_id, saved_user_message.id)
+
+        if draft_repository is not None:
+            try:
+                draft_context = await load_trip_draft_context(
+                    draft_repository,
+                    user_id,
+                    conversation_id,
+                )
+            except Exception as exc:
+                app_logger.warning("Trip draft context unavailable: %s", type(exc).__name__)
+                draft_context = None
+            if draft_context is not None:
+                context.append(
+                    {
+                        "role": "system",
+                        "content": json.dumps(
+                            {"trip_workspace": draft_context},
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
 
         decision = await MainAgentService().decide(user_message, context)
 
@@ -224,12 +247,14 @@ async def stream_chat(
 
     app_state = getattr(getattr(request, "app", None), "state", None)
     registry = getattr(app_state, "planning_registry", None)
+    draft_repository = getattr(app_state, "draft_repository", None)
     return StreamingResponse(
         generate_sse_stream(
             conversation_id,
             data.content,
             str(user.id),
             registry=registry,
+            draft_repository=draft_repository,
         ),
         media_type="text/event-stream",
         headers={

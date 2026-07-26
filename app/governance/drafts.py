@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.models.base import async_session_maker
 from app.models.draft import TripDraft
-from app.schemas.planning import TripDraftRecord
+from app.schemas.planning import TravelPlanDraft, TripDraftRecord
 
 
 class DraftRepository(Protocol):
@@ -33,6 +33,40 @@ class InMemoryDraftRepository:
         record.version = existing.version + 1 if existing else 1
         self.records[key] = record.model_copy(deep=True)
         return record
+
+
+async def save_trip_draft(
+    repository: DraftRepository,
+    user_id: str,
+    conversation_id: str,
+    draft: TravelPlanDraft,
+) -> TripDraftRecord:
+    """Persist one generated draft through the workspace repository boundary."""
+
+    record = TripDraftRecord(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        requirement=draft.requirement.model_dump(mode="json"),
+        content=draft.model_dump(mode="json"),
+    )
+    return await repository.save(record)
+
+
+async def load_trip_draft_context(
+    repository: DraftRepository,
+    user_id: str,
+    conversation_id: str,
+) -> dict | None:
+    """Return the durable workspace in a compact, model-readable shape."""
+
+    record = await repository.get(user_id, conversation_id)
+    if record is None:
+        return None
+    return {
+        "version": record.version,
+        "requirement": record.requirement,
+        "content": record.content,
+    }
 
 
 class PostgresDraftRepository:

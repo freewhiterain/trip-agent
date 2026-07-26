@@ -8,7 +8,9 @@ from app.agents.subagents.registry import SubagentRegistry
 from app.agents.workers.registry import WorkerRegistry
 from app.api.v1 import planning as planning_api
 from app.api.v1 import tools as tools_api
-from app.schemas.planning import BudgetSummary, TravelPlanDraft, TravelRequirement
+from app.governance.events import InMemoryEventRepository
+from app.schemas.governance import TaskEventRecord
+from app.schemas.planning import BudgetSummary, TripDraftRecord, TravelPlanDraft, TravelRequirement
 
 from tests.test_trip_form_tool_flow import (
     FakeDraft,
@@ -36,6 +38,37 @@ def draft_for(requirement: TravelRequirement) -> TravelPlanDraft:
         worker_results=[],
         evidence=[],
     )
+
+
+@pytest.mark.asyncio
+async def test_planning_task_status_reports_failed_and_degraded_terminal_events(monkeypatch):
+    repository = InMemoryEventRepository()
+    await repository.append(
+        TaskEventRecord(
+            task_id="failed-task",
+            user_id="user-1",
+            event_type="task_failed",
+            payload={"error": "ProviderError"},
+            sequence=1,
+        )
+    )
+    await repository.append(
+        TaskEventRecord(
+            task_id="degraded-task",
+            user_id="user-1",
+            event_type="task_completed",
+            payload={"status": "degraded"},
+            sequence=1,
+        )
+    )
+    monkeypatch.setattr(planning_api, "PostgresEventRepository", lambda: repository)
+    user = SimpleNamespace(id="user-1")
+
+    failed = await planning_api.get_planning_task("failed-task", user)
+    degraded = await planning_api.get_planning_task("degraded-task", user)
+
+    assert failed["status"] == "failed"
+    assert degraded["status"] == "degraded"
 
 
 def test_factory_selects_legacy_registry_for_supervisor_mode(monkeypatch):
@@ -116,6 +149,56 @@ async def test_planning_endpoint_uses_configured_factory_runner(monkeypatch):
 
     assert captured["requirement"].destination == "Chengdu"
     assert result["draft"]["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_planning_endpoint_persists_a_draft_only_for_an_owned_conversation(monkeypatch):
+    captured = {}
+
+    class QueryResult:
+        def scalar_one_or_none(self):
+            return object()
+
+    class FakeDB:
+        async def execute(self, _statement):
+            return QueryResult()
+
+    async def fake_run(requirement, **kwargs):
+        captured.update(kwargs)
+        return draft_for(requirement)
+
+    async def fake_save(repository, user_id, conversation_id, draft):
+        captured["draft_save"] = (user_id, conversation_id, draft)
+        return TripDraftRecord(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            version=3,
+            requirement=draft.requirement.model_dump(mode="json"),
+            content=draft.model_dump(mode="json"),
+        )
+
+    monkeypatch.setattr(planning_api, "run_travel_planning", fake_run)
+    monkeypatch.setattr(planning_api, "save_trip_draft", fake_save)
+    async def empty_defaults(*_args):
+        return {}
+
+    monkeypatch.setattr(planning_api, "resolve_preference_defaults", empty_defaults)
+    monkeypatch.setattr(planning_api, "get_checkpointer", _none)
+
+    user = SimpleNamespace(id="user-1")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = await planning_api.create_planning_task(
+        requirement(),
+        user,
+        request,
+        "conversation-1",
+        FakeDB(),
+    )
+
+    assert result["status"] == "completed"
+    assert result["draft_version"] == 3
+    assert captured["conversation_id"] == "conversation-1"
+    assert captured["draft_save"][:2] == ("user-1", "conversation-1")
 
 
 @pytest.mark.asyncio

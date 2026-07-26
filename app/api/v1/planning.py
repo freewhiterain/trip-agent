@@ -3,11 +3,14 @@
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import factory as agent_factory
 from app.api.dependencies import get_current_user
 from app.core.checkpointer import get_checkpointer
 from app.governance.approvals import ApprovalService
+from app.governance.drafts import PostgresDraftRepository, save_trip_draft
 from app.governance.events import TaskEventService
 from app.governance.itineraries import ItineraryGovernanceService
 from app.governance.postgres import (
@@ -20,6 +23,8 @@ from app.governance.postgres import (
 from app.memory.defaults import apply_preference_defaults, resolve_preference_defaults
 from app.memory.service import MemoryGovernanceService
 from app.models.user import User
+from app.models.base import get_db
+from app.models.conversation import Conversation
 from app.schemas.governance import ApprovalDecisionRequest, ItinerarySaveRequest, PreferenceProposalRequest
 from app.schemas.planning import TravelRequirement
 from app.utils.logger import app_logger
@@ -37,9 +42,19 @@ async def create_planning_task(
     requirement: TravelRequirement,
     user: User = Depends(get_current_user),
     request: Request = None,
+    conversation_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
 ):
     task_id = uuid4().hex
     event_service = TaskEventService(PostgresEventRepository())
+    if conversation_id:
+        result = await db.execute(
+            select(Conversation)
+            .where(Conversation.id == conversation_id)
+            .where(Conversation.user_id == user.id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="conversation not found")
     try:
         defaults = await resolve_preference_defaults(str(user.id), PostgresPreferenceRepository())
     except Exception as exc:
@@ -55,8 +70,22 @@ async def create_planning_task(
         user_id=str(user.id),
         registry=getattr(app_state, "planning_registry", None),
         fallback_reason=getattr(app_state, "planning_fallback_reason", None),
+        conversation_id=conversation_id,
     )
-    return {"task_id": task_id, "status": "completed", "draft": draft.model_dump(mode="json")}
+    draft_record = None
+    if conversation_id:
+        draft_record = await save_trip_draft(
+            PostgresDraftRepository(),
+            str(user.id),
+            conversation_id,
+            draft,
+        )
+    return {
+        "task_id": task_id,
+        "status": "degraded" if draft.status == "degraded" else "completed",
+        "draft": draft.model_dump(mode="json"),
+        "draft_version": draft_record.version if draft_record else None,
+    }
 
 
 @router.get("/tasks/{task_id}")
@@ -64,11 +93,29 @@ async def get_planning_task(task_id: str, user: User = Depends(get_current_user)
     events = await PostgresEventRepository().list(task_id, str(user.id))
     if not events:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    last_event = events[-1]
+    if last_event.event_type == "task_failed":
+        task_status = "failed"
+    elif last_event.event_type == "task_completed":
+        task_status = last_event.payload.get("status", "completed")
+    else:
+        task_status = "running"
     return {
         "task_id": task_id,
-        "status": "completed" if events[-1].event_type == "task_completed" else "running",
-        "last_event": events[-1].model_dump(mode="json"),
+        "status": task_status,
+        "last_event": last_event.model_dump(mode="json"),
     }
+
+
+@router.get("/drafts/{conversation_id}")
+async def get_trip_draft(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+):
+    record = await PostgresDraftRepository().get(str(user.id), conversation_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="draft not found")
+    return record.model_dump(mode="json")
 
 
 @router.get("/tasks/{task_id}/events")

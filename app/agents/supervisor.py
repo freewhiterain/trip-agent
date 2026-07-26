@@ -564,7 +564,7 @@ def create_supervisor_graph(
             governance_warnings=state.get("warnings", []),
         )
         await emit(state, "plan_generated", {"days": len(draft.itinerary), "warnings": len(draft.warnings)})
-        await emit(state, "task_completed", {"status": "completed"})
+        await emit(state, "task_completed", {"status": draft.status})
         return {
             "draft": draft.model_dump(mode="json"),
             "status": "completed",
