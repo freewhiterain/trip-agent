@@ -4,12 +4,13 @@ import json
 import asyncio
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
+from app.agents.agent_tools import run_agent_tool
 from app.governance.tool_invocations import PostgresToolInvocationRepository, ToolInvocationRecord
 from app.models.base import async_session_maker, get_db
 from app.models.conversation import Conversation
@@ -17,7 +18,7 @@ from app.models.message import Message
 from app.models.user import User
 from app.schemas.events import SSEEvent
 from app.schemas.message import MessageCreate
-from app.schemas.tools import ToolCallPayload
+from app.schemas.tools import AgentToolResult, ToolCallPayload
 from app.services.main_agent import MainAgentService
 from app.services.open_qa import answer_open_question
 from app.utils.logger import app_logger
@@ -80,6 +81,7 @@ async def generate_sse_stream(
     conversation_id: str,
     user_message: str,
     user_id: str,
+    registry=None,
 ):
     """Save one user turn, decide once, and stream its explicit action."""
     task_id = uuid4().hex
@@ -134,6 +136,44 @@ async def generate_sse_stream(
             yield sse(event("done"))
             return
 
+        if decision.action == "invoke_agent_tool" and decision.tool_call is not None:
+            call_id = uuid4().hex
+            tool_call = decision.tool_call
+            call_payload = {
+                "call_id": call_id,
+                "tool": tool_call.name,
+                "arguments": tool_call.arguments.model_dump(mode="json"),
+            }
+            yield sse(event("tool_call", call_payload))
+
+            if registry is None:
+                result: AgentToolResult = await run_agent_tool(tool_call)
+            else:
+                result = await run_agent_tool(tool_call, registry=registry)
+            result_payload = {
+                "call_id": call_id,
+                "tool": result.tool_name,
+                "status": result.status,
+                "result": result.model_dump(mode="json"),
+            }
+            yield sse(event("tool_result", result_payload))
+
+            async with async_session_maker() as db:
+                await save_message(
+                    db,
+                    conversation_id,
+                    "assistant",
+                    result.answer,
+                    {
+                        "action": decision.action,
+                        "tool_call": call_payload,
+                        "tool_result": result.model_dump(mode="json"),
+                    },
+                )
+            yield sse(event("token", {"content": result.answer, "action": decision.action}))
+            yield sse(event("done"))
+            return
+
         if decision.action in {"answer_open_question", "recommend_destination"}:
             answer = await answer_open_question(user_message)
             async with async_session_maker() as db:
@@ -169,6 +209,7 @@ async def generate_sse_stream(
 async def stream_chat(
     conversation_id: str,
     data: MessageCreate,
+    request: Request = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -181,8 +222,15 @@ async def stream_chat(
     if not conversation:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
 
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    registry = getattr(app_state, "planning_registry", None)
     return StreamingResponse(
-        generate_sse_stream(conversation_id, data.content, str(user.id)),
+        generate_sse_stream(
+            conversation_id,
+            data.content,
+            str(user.id),
+            registry=registry,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

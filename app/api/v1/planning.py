@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.agents import factory as agent_factory
 from app.api.dependencies import get_current_user
@@ -33,7 +33,11 @@ async def run_travel_planning(*args, **kwargs):
 
 
 @router.post("/tasks")
-async def create_planning_task(requirement: TravelRequirement, user: User = Depends(get_current_user)):
+async def create_planning_task(
+    requirement: TravelRequirement,
+    user: User = Depends(get_current_user),
+    request: Request = None,
+):
     task_id = uuid4().hex
     event_service = TaskEventService(PostgresEventRepository())
     try:
@@ -42,12 +46,15 @@ async def create_planning_task(requirement: TravelRequirement, user: User = Depe
         app_logger.warning(f"读取长期偏好失败，按无偏好处理: task_id={task_id} error={exc}", exc_info=True)
         defaults = {}
     requirement = apply_preference_defaults(requirement, defaults)
+    app_state = getattr(getattr(request, "app", None), "state", None)
     draft = await run_travel_planning(
         requirement,
         checkpointer=await get_checkpointer(),
         event_service=event_service,
         task_id=task_id,
         user_id=str(user.id),
+        registry=getattr(app_state, "planning_registry", None),
+        fallback_reason=getattr(app_state, "planning_fallback_reason", None),
     )
     return {"task_id": task_id, "status": "completed", "draft": draft.model_dump(mode="json")}
 

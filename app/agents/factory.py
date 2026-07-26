@@ -55,7 +55,7 @@ async def run_travel_planning(requirement, **kwargs):
     from app.agents.supervisor import run_travel_planning as supervisor_runner
 
     registry = kwargs.pop("registry", None)
-    fallback_reason = None
+    fallback_reason = kwargs.pop("fallback_reason", None)
     if registry is None:
         registry, fallback_reason = create_planning_registry()
 

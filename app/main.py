@@ -4,6 +4,7 @@ FastAPI 应用入口
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.agents.factory import create_planning_registry
 from app.config import settings
 from app.utils.logger import app_logger
 from app.api.v1 import conversations, chat, planning, tools, users
@@ -33,6 +34,9 @@ async def lifespan(app: FastAPI):
 
             # 初始化 MCP（如果配置了的话）
             mcp = await MCPClientManager.get_instance()
+            planning_registry, planning_fallback_reason = create_planning_registry()
+            app.state.planning_registry = planning_registry
+            app.state.planning_fallback_reason = planning_fallback_reason
             app_logger.info("MCP 服务初始化完成")
 
             yield
