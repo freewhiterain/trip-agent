@@ -1362,6 +1362,11 @@
           if (toolCall && toolCall.tool === "collect_trip_requirements") {
             latestCallId = toolCall.call_id;
             receiveTripToolCall(toolCall, `history-msg-${index}`, false);
+          } else if (toolCall) {
+            appendResearchEvent(`history-msg-${index}`, {
+              type: "agent_tool_call",
+              payload: toolCall,
+            });
           }
           if (extra_info.assistant_result) {
             appendWorkerResults(`history-msg-${index}`, extra_info.assistant_result);
@@ -1371,11 +1376,15 @@
           const extra_info = msg.extra_info || {};
           const toolResult = extra_info.tool_result;
           if (toolResult) {
-            applyTripToolResult(
-              toolResult,
-              toolResult.call_id || toolResult.task_id || latestCallId,
-              false
-            );
+            if (toolResult.tool_name) {
+              appendAgentToolResult(`history-msg-${index}`, toolResult, false);
+            } else {
+              applyTripToolResult(
+                toolResult,
+                toolResult.call_id || toolResult.task_id || latestCallId,
+                false
+              );
+            }
           }
         });
         restorePendingTool();
@@ -1670,6 +1679,38 @@
         content.insertAdjacentHTML("beforeend", renderWorkerResults(draft));
       }
 
+      function appendAgentToolResult(messageId, payload, shouldScroll = true) {
+        const message = document.getElementById(messageId);
+        if (!message) return;
+        const content = message.querySelector(".message-content");
+        if (!content) return;
+        const result = payload?.result || payload;
+        const card = document.createElement("section");
+        card.className = "worker-results agent-tool-result";
+        const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+        card.innerHTML = `<div class="worker-results-title"><span>Agent Tool: ${escapeHtml(result?.worker || payload?.tool || "research")}</span><span class="worker-results-label">${escapeHtml(result?.status || payload?.status || "unknown")}</span></div>
+          <p>${escapeHtml(result?.answer || "")}</p>
+          <small>Evidence: ${Number(result?.evidence_count || 0)}</small>
+          ${warnings.length ? `<details><summary>Warnings (${warnings.length})</summary><ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></details>` : ""}`;
+        content.appendChild(card);
+        if (shouldScroll) document.getElementById("chatMessages").scrollTop = document.getElementById("chatMessages").scrollHeight;
+      }
+
+      function appendResearchEvent(messageId, event, shouldScroll = true) {
+        const message = document.getElementById(messageId);
+        if (!message) return;
+        const content = message.querySelector(".message-content");
+        if (!content) return;
+        const payload = event?.payload || event || {};
+        const type = event?.type || "research_event";
+        const label = type.replaceAll("_", " ");
+        const line = document.createElement("div");
+        line.className = `research-event ${escapeAttribute(type)}`;
+        line.innerHTML = `<strong>${escapeHtml(label)}</strong><span>${escapeHtml(payload.worker || payload.tool_name || "")}</span>${payload.evidence_count != null ? `<small>Evidence: ${Number(payload.evidence_count)}</small>` : ""}${payload.conflict_count != null ? `<small>Conflicts: ${Number(payload.conflict_count)}</small>` : ""}`;
+        content.appendChild(line);
+        if (shouldScroll) document.getElementById("chatMessages").scrollTop = document.getElementById("chatMessages").scrollHeight;
+      }
+
       async function submitTripToolResult(callId, status) {
         const tool = state.tripTools[callId];
         if (!tool || tool.submitting) return;
@@ -1829,7 +1870,13 @@
                 fullText += parsed.content;
                 updateMessage(msgId, fullText);
               } else if (parsed.type === "tool_call") {
-                receiveTripToolCall(parsed.payload || parsed, msgId);
+                const call = parsed.payload || parsed;
+                if (call.tool === "collect_trip_requirements") receiveTripToolCall(call, msgId);
+                else appendResearchEvent(msgId, { type: "agent_tool_call", payload: call });
+              } else if (parsed.type === "tool_result") {
+                appendAgentToolResult(msgId, parsed.payload || parsed);
+              } else if (["subagent_started", "subagent_completed", "subagent_tool_call", "subagent_tool_completed", "follow_up_search", "evidence_collected", "research_conflict"].includes(parsed.type)) {
+                appendResearchEvent(msgId, parsed);
               } else if (parsed.type === "result") {
                 appendWorkerResults(msgId, parsed.payload?.result || parsed.result);
               } else if (parsed.type === "error") {

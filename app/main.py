@@ -2,8 +2,10 @@
 FastAPI 应用入口
 """
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from app.agents.factory import create_planning_registry
 from app.config import settings
 from app.governance.drafts import PostgresDraftRepository
@@ -60,6 +62,13 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+@app.get("/ui", include_in_schema=False)
+async def ui():
+    return FileResponse(_PROJECT_ROOT / "1_zhixing.html")
 
 app.add_middleware(
     CORSMiddleware,

@@ -12,7 +12,7 @@ set "POSTGRES_PASSWORD=travel123456"
 set "REDIS_CONTAINER=travel_redis"
 set "REDIS_VOLUME=trip_redis_data"
 set "APP_URL=http://127.0.0.1:18000"
-set "DOCS_URL=http://localhost:18000/docs"
+set "DOCS_URL=http://localhost:18000/ui"
 
 if not exist ".venv\Scripts\python.exe" (
     echo [错误] 未找到虚拟环境 .venv，请先创建虚拟环境并安装依赖。

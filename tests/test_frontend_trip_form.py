@@ -62,3 +62,20 @@ def test_frontend_renders_mock_rag_worker_status_and_sources():
     assert "assistant_result" in html
     assert "result.evidence" in html
     assert "result.warnings" in html
+
+
+def test_frontend_renders_agent_tool_and_deep_search_events():
+    html = read_page()
+
+    assert "appendAgentToolResult" in html
+    assert "appendResearchEvent" in html
+    assert 'parsed.type === "tool_result"' in html
+    assert '"subagent_tool_call"' in html
+    assert '"research_conflict"' in html
+    assert "evidence_count" in html
+
+
+def test_fastapi_exposes_the_frontend_entrypoint():
+    from app.main import app
+
+    assert any(route.path == "/ui" for route in app.routes)
