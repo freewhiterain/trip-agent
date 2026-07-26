@@ -137,6 +137,9 @@ class TimeSlot(BaseModel):
     period: Literal["morning", "afternoon", "evening"]
     title: str
     description: str = ""
+    location: str | None = None
+    travel_minutes: int | None = Field(default=None, ge=0)
+    opening_window: str | None = None
     estimated_cost: float | None = Field(default=None, ge=0)
     evidence_indexes: list[int] = Field(default_factory=list)
 

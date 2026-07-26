@@ -19,6 +19,7 @@ from langgraph.types import Send
 from pydantic import BaseModel, Field
 
 from app.agents.planner import create_research_plan, parallel_groups
+from app.agents.scheduling import calculate_budget, schedule_itinerary
 from app.agents.subagents.registry import create_default_subagent_registry
 from app.config import settings
 from app.governance.evidence import EvidenceGovernanceService, ReviewedResearch
@@ -253,7 +254,7 @@ def _subagent_responses_from_state(state: SupervisorState) -> list[SubagentRespo
     return [_worker_result_to_subagent_response(result) for result in _worker_results_from_state(state)]
 
 
-def build_itinerary(
+def _legacy_build_itinerary(
     requirement: TravelRequirement,
     results: list[WorkerResult],
 ) -> list[ItineraryDay]:
@@ -300,7 +301,7 @@ def build_itinerary(
     return itinerary
 
 
-def build_budget(requirement: TravelRequirement) -> BudgetSummary:
+def _legacy_build_budget(requirement: TravelRequirement) -> BudgetSummary:
     """确定性预算汇总：只做用户输入的算术拆分，不虚构价格。"""
     notes = ["实时价格数据接入前不生成虚假费用估算。"]
     if requirement.budget:
@@ -536,17 +537,17 @@ def create_supervisor_graph(
             )
             for response in reviewed.responses
         ]
-        itinerary = build_itinerary(requirement, results)
+        itinerary, scheduling_warnings = schedule_itinerary(requirement, results)
         await emit(state, "route_planned", {"days": len(itinerary)})
         return {
             "itinerary": [day.model_dump(mode="json") for day in itinerary],
             "worker_results": {result.task_id: result.model_dump(mode="json") for result in results},
-            "warnings": reviewed.warnings,
+            "warnings": [*reviewed.warnings, *scheduling_warnings],
         }
 
     async def budget_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
-        budget = build_budget(requirement)
+        budget = calculate_budget(requirement, _worker_results_from_state(state))
         await emit(state, "budget_estimated", {"total_estimate": budget.total_estimate})
         return {"budget": budget.model_dump(mode="json")}
 
@@ -631,3 +632,22 @@ async def run_travel_planning(
 async def create_supervisor_agent():
     """兼容 Agent 工厂的异步构造入口。"""
     return create_supervisor_graph()
+
+
+def build_itinerary(
+    requirement: TravelRequirement,
+    results: list[WorkerResult],
+) -> list[ItineraryDay]:
+    """Compatibility wrapper for the constraint-aware scheduler."""
+
+    itinerary, _warnings = schedule_itinerary(requirement, results)
+    return itinerary
+
+
+def build_budget(
+    requirement: TravelRequirement,
+    results: list[WorkerResult] | None = None,
+) -> BudgetSummary:
+    """Compatibility wrapper for evidence-backed budget calculation."""
+
+    return calculate_budget(requirement, results or [])
