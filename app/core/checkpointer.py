@@ -60,6 +60,10 @@ class CheckpointerManager:
         """关闭连接池"""
         if self.pool:
             await self.pool.close()
+        self.pool = None
+        self.checkpointer = None
+        type(self)._instance = None
+        if self.pool:
             app_logger.info("Checkpointer 连接池已关闭")
 
     def get_checkpointer(self) -> AsyncPostgresSaver:

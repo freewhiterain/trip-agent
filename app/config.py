@@ -3,6 +3,8 @@
 使用 pydantic-settings 管理环境变量
 """
 import os
+from urllib.parse import quote
+from sqlalchemy.engine import URL
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from functools import lru_cache
@@ -40,6 +42,10 @@ class Settings(BaseSettings):
     travel_agent_mode: str = Field(default="supervisor_subagents", alias="TRAVEL_AGENT_MODE")
     allow_legacy_fallback: bool = Field(default=False, alias="ALLOW_LEGACY_FALLBACK")
     enable_external_tools: bool = Field(default=False, alias="ENABLE_EXTERNAL_TOOLS")
+    cors_origins: str = Field(
+        default="http://localhost:18000,http://127.0.0.1:18000",
+        alias="CORS_ORIGINS",
+    )
 
     # ============== LLM 配置 ==============
     dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
@@ -102,17 +108,26 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """生成 PostgreSQL 连接字符串"""
-        return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        return URL.create(
+            "postgresql",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        ).render_as_string(hide_password=False)
 
     @property
     def redis_url(self) -> str:
         """生成 Redis 连接字符串"""
         if self.redis_password:
-            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+            password = quote(self.redis_password, safe="")
+            return f"redis://:{password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache

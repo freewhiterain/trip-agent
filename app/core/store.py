@@ -59,6 +59,10 @@ class StoreManager:
     async def close(self):
         if self.pool:
             await self.pool.close()
+        self.pool = None
+        self.store = None
+        type(self)._instance = None
+        if self.pool:
             app_logger.info("Connection Pool 已关闭")
 
     def get_store(self) -> AsyncPostgresStore:

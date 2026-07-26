@@ -66,6 +66,8 @@ python scripts/init_rag.py
 
 ```powershell
 python app/main.py
+# UI: http://localhost:18000/ui
+# API docs: http://localhost:18000/docs
 # 访问 http://localhost:8000/docs
 ```
 
