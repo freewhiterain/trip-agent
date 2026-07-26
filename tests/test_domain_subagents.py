@@ -197,6 +197,191 @@ async def test_explicit_deep_research_runs_even_when_rag_is_sufficient():
     assert result.research_report == deep_report
 
 
+@pytest.mark.asyncio
+async def test_conflicting_provider_evidence_triggers_deep_search_even_when_a_provider_was_sufficient():
+    # 用户报的核心问题：deep search 在信息冲突时不触发。改动前只要某个
+    # provider 报 sufficient 就直接收尾，两个来源给出矛盾事实时也不补搜。
+    deep_report = ResearchReport(
+        status="completed",
+        summary="Official source resolves the conflict.",
+        evidence=[Evidence(id="ev-official", content="Official notice: open.", source="official")],
+    )
+    deep_search = RecordingDeepSearch(deep_report)
+    agent = AttractionsSubagent(
+        rag=FakeProvider(
+            "local_rag",
+            [
+                Evidence(
+                    id="ev-open",
+                    content="Panda Base is open.",
+                    source="guide-a",
+                    metadata={"fact_key": "opening_status", "fact_value": "open"},
+                ),
+                Evidence(
+                    id="ev-closed",
+                    content="Panda Base is closed.",
+                    source="guide-b",
+                    metadata={"fact_key": "opening_status", "fact_value": "closed"},
+                ),
+            ],
+        ),
+        search=FakeProvider("search_mcp", []),
+        deep_search=deep_search,
+    )
+
+    result = await agent.run(task("attractions"), requirement())
+
+    assert len(deep_search.calls) == 1
+    # 第一轮查询就要带上冲突事实，而不是白跑一轮原查询。
+    assert "opening_status" in deep_search.calls[0][0].query
+    assert any("disagree on opening_status" in warning for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_conflicting_evidence_is_reported_when_the_worker_may_not_deep_search():
+    # weather 的 ToolPolicy 不允许 deep research，冲突不能悄悄咽下去。
+    deep_search = FailIfCalled()
+    agent = WeatherSubagent(
+        weather_mcp=FakeProvider(
+            "weather_mcp",
+            [
+                Evidence(
+                    id="ev-rain",
+                    content="Rain is expected.",
+                    source="api-a",
+                    metadata={"fact_key": "precipitation", "fact_value": "rain"},
+                ),
+                Evidence(
+                    id="ev-clear",
+                    content="Clear skies are expected.",
+                    source="api-b",
+                    metadata={"fact_key": "precipitation", "fact_value": "clear"},
+                ),
+            ],
+        ),
+        deep_search=deep_search,
+    )
+
+    result = await agent.run(task("weather"), requirement())
+
+    assert deep_search.calls == []
+    assert any("disagree on precipitation" in warning for warning in result.warnings)
+    assert any("unresolved" in warning.lower() for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_agreeing_provider_evidence_does_not_trigger_deep_search():
+    # 同一 fact_key 上取值一致时不算冲突，不能因此白烧一次补搜。
+    deep_search = FailIfCalled()
+    agent = AttractionsSubagent(
+        rag=FakeProvider(
+            "local_rag",
+            [
+                Evidence(
+                    id="ev-a",
+                    content="Panda Base is open.",
+                    source="guide-a",
+                    metadata={"fact_key": "opening_status", "fact_value": "open"},
+                ),
+                Evidence(
+                    id="ev-b",
+                    content="Panda Base is open in the morning.",
+                    source="guide-b",
+                    metadata={"fact_key": "opening_status", "fact_value": "open"},
+                ),
+            ],
+        ),
+        search=FakeProvider("search_mcp", []),
+        deep_search=deep_search,
+    )
+
+    result = await agent.run(task("attractions"), requirement())
+
+    assert deep_search.calls == []
+    assert result.status == "completed"
+
+
+def test_subagent_keeps_chinese_claims_that_reword_the_evidence():
+    # 改动前 _text_supported 用整串子串匹配，而 re.findall(r"\w+") 不切中文，
+    # 整段中文塌成一个 token。于是模型只要调整语序或加标点，claims 和
+    # candidates 就会被全部丢弃——中文路径上的 grounding 等于删掉模型全部输出。
+    agent = AttractionsSubagent()
+    analysis = SubagentAnalysis(
+        summary="上午开放的熊猫基地，需要预约门票。",
+        claims=[Claim(text="熊猫基地上午开放", evidence_ids=["ev-1"])],
+        candidates=[
+            EvidenceBoundCandidate(
+                name="熊猫基地",
+                description="上午开放，门票需要预约",
+                evidence_ids=["ev-1"],
+            )
+        ],
+    )
+
+    grounded, warnings = agent._ground_analysis(
+        analysis,
+        [
+            Evidence(
+                id="ev-1",
+                content="熊猫基地上午开放，门票需要提前预约。",
+                source="official",
+            )
+        ],
+    )
+
+    assert [claim.text for claim in grounded.claims] == ["熊猫基地上午开放"]
+    assert [candidate.name for candidate in grounded.candidates] == ["熊猫基地"]
+    assert grounded.summary
+    assert warnings == []
+
+
+def test_subagent_still_drops_chinese_content_introducing_facts_not_in_evidence():
+    # 放宽到词级覆盖不能变成放弃校验：证据里没有的实词（价格、"免费"）必须拦住。
+    agent = AttractionsSubagent()
+    analysis = SubagentAnalysis(
+        claims=[Claim(text="熊猫基地免费开放", evidence_ids=["ev-1"])],
+        candidates=[
+            EvidenceBoundCandidate(
+                name="熊猫基地",
+                description="门票 200 元",
+                evidence_ids=["ev-1"],
+            )
+        ],
+    )
+
+    grounded, warnings = agent._ground_analysis(
+        analysis,
+        [Evidence(id="ev-1", content="熊猫基地上午开放，门票需要提前预约。", source="official")],
+    )
+
+    assert grounded.claims == []
+    assert grounded.candidates == []
+    assert len(warnings) >= 2
+
+
+def test_estimated_cost_matches_an_integer_price_written_in_the_evidence():
+    # estimated_cost 是 float，"55.0" 与证据里的 "55" 此前永远对不上，
+    # 任何带价格的候选都会被丢弃。
+    agent = AttractionsSubagent()
+    analysis = SubagentAnalysis(
+        candidates=[
+            EvidenceBoundCandidate(
+                name="熊猫基地",
+                description="门票 55 元",
+                estimated_cost=55,
+                evidence_ids=["ev-1"],
+            )
+        ],
+    )
+
+    grounded, _ = agent._ground_analysis(
+        analysis,
+        [Evidence(id="ev-1", content="熊猫基地门票 55 元。", source="official")],
+    )
+
+    assert [candidate.estimated_cost for candidate in grounded.candidates] == [55]
+
+
 def test_subagent_drops_content_not_supported_by_referenced_evidence():
     agent = AttractionsSubagent()
     analysis = SubagentAnalysis(

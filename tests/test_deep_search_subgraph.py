@@ -264,3 +264,101 @@ async def test_deep_search_discards_claims_without_matching_evidence_ids():
 
     assert report.claims == []
     assert any("unbound claim" in warning.lower() for warning in report.warnings)
+
+
+@pytest.mark.asyncio
+async def test_conflicting_evidence_drives_a_follow_up_round_even_when_evaluator_is_satisfied():
+    # 改动前：评估器说 needs_follow_up=False 就直接收尾，冲突只被写成一条
+    # warning。Deep Search 在最需要它的场景（来源互相打架）里反而不跑第二轮。
+    calls = []
+
+    async def search(query, limit):
+        calls.append(query)
+        if len(calls) == 1:
+            # 第一轮两个来源就给出互相矛盾的开放状态。
+            return [
+                Evidence(
+                    id="ev-open",
+                    content="熊猫基地开放",
+                    source="source-a",
+                    metadata={"fact_key": "opening_status", "fact_value": "开放"},
+                ),
+                Evidence(
+                    id="ev-closed",
+                    content="熊猫基地关闭",
+                    source="source-b",
+                    metadata={"fact_key": "opening_status", "fact_value": "关闭"},
+                ),
+            ]
+        return [Evidence(id="ev-official", content="官方公告：开放", source="official")]
+
+    report = await run_deep_search(
+        DeepSearchRequest(query="熊猫基地开放状态", worker="attractions", max_rounds=3),
+        search=search,
+        # 评估器全程宣称证据充足，冲突必须由循环自己识别并强制补搜。
+        evaluator=FakeEvaluator(needs_follow_up=False),
+    )
+
+    assert report.rounds == 2
+    assert len(calls) == 2
+    # 补搜查询必须带上冲突事实，否则只是重复原查询。
+    assert "opening_status" in calls[1]
+    assert [conflict.fact_key for conflict in report.conflicts] == ["opening_status"]
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_conflict_is_chased_once_and_not_forever():
+    # 冲突追过一轮仍未消解时不能反复烧工具调用；报告里仍要保留冲突，
+    # 交给上层降级处理。
+    calls = []
+
+    async def search(query, limit):
+        calls.append(query)
+        # 每轮都同时返回两个互相冲突的值，冲突永远无法消解。
+        return [
+            Evidence(
+                id=f"ev-{len(calls)}-open",
+                content="开放",
+                source=f"a-{len(calls)}",
+                metadata={"fact_key": "opening_status", "fact_value": "开放"},
+            ),
+            Evidence(
+                id=f"ev-{len(calls)}-closed",
+                content="关闭",
+                source=f"b-{len(calls)}",
+                metadata={"fact_key": "opening_status", "fact_value": "关闭"},
+            ),
+        ]
+
+    report = await run_deep_search(
+        DeepSearchRequest(query="状态核实", worker="attractions", max_rounds=3, max_tool_calls=5),
+        search=search,
+        evaluator=FakeEvaluator(needs_follow_up=False),
+    )
+
+    assert report.rounds == 2
+    assert len(calls) == 2
+    assert report.conflicts
+    assert report.status == "partial"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_queries_are_written_in_chinese_like_the_rest_of_the_product():
+    # 产品面向中文用户、检索的也是中文语料；混入 "latest official round N"
+    # 这类英文模板会让 BM25 分词命中一堆无关词。
+    calls = []
+
+    async def search(query, limit):
+        calls.append(query)
+        return [Evidence(id=f"ev-{len(calls)}", content=query, source="web")]
+
+    await run_deep_search(
+        DeepSearchRequest(query="成都住宿政策", worker="hotel", max_rounds=2),
+        search=search,
+        evaluator=FakeEvaluator(needs_follow_up=True, missing_facts=["退订政策"]),
+    )
+
+    assert len(calls) == 2
+    assert "latest" not in calls[1]
+    assert "round" not in calls[1]
+    assert "退订政策" in calls[1]

@@ -26,6 +26,9 @@ class LocalKnowledgeService:
         self.documents = documents if documents is not None else DocumentManager().load_all_documents()
         self.vectorstore = vectorstore if vectorstore is not None else self._load_vectorstore()
         self.retriever = self._build_retriever(self.documents, self.vectorstore)
+        # 按 (城市, 类别) 缓存检索器：构建包含文档切分和 BM25 索引重建，
+        # 放在请求路径上每次重做是 CPU 热点。
+        self._scoped_retrievers: dict[tuple[str, str], HybridRetriever | None] = {}
 
     @staticmethod
     def _load_vectorstore() -> Chroma | None:
@@ -71,19 +74,11 @@ class LocalKnowledgeService:
     ) -> list[Evidence]:
         normalized_destination = destination.strip().casefold()
         normalized_category = category.strip().casefold()
-        documents = [
-            document
-            for document in self.documents
-            if str(document.metadata.get("city", "")).strip().casefold() == normalized_destination
-            and str(document.metadata.get("category", "")).strip().casefold() == normalized_category
-        ]
-        if not documents:
+        retriever = self._scoped_retriever(normalized_destination, normalized_category)
+        if retriever is None:
             return []
 
         retrieval_query = f"{destination} {category} {query}"
-        retriever = self._build_retriever(documents, self.vectorstore)
-        if retriever is None:
-            return []
         metadata_filter = (
             {"$and": [{"city": destination.strip()}, {"category": category.strip()}]}
             if self.vectorstore is not None
@@ -93,6 +88,25 @@ class LocalKnowledgeService:
             evidence_from_document(document)
             for document in retriever.retrieve(retrieval_query, metadata_filter=metadata_filter)
         ]
+
+    def _scoped_retriever(
+        self,
+        normalized_destination: str,
+        normalized_category: str,
+    ) -> HybridRetriever | None:
+        cache_key = (normalized_destination, normalized_category)
+        if cache_key in self._scoped_retrievers:
+            return self._scoped_retrievers[cache_key]
+
+        documents = [
+            document
+            for document in self.documents
+            if str(document.metadata.get("city", "")).strip().casefold() == normalized_destination
+            and str(document.metadata.get("category", "")).strip().casefold() == normalized_category
+        ]
+        retriever = self._build_retriever(documents, self.vectorstore) if documents else None
+        self._scoped_retrievers[cache_key] = retriever
+        return retriever
 
 
 @lru_cache(maxsize=1)

@@ -12,7 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from app.agents.subagents.tool_policy import ToolPolicy
-from app.rag.evidence import is_evidence_fresh
+from app.rag.evidence import detect_fact_conflicts, is_evidence_fresh, merge_fact_conflicts
 from app.schemas.planning import Evidence, ResearchTask, TaskType
 from app.schemas.research import Claim, ResearchConflict, ResearchReport
 
@@ -175,37 +175,25 @@ def _dedupe_key(item: Evidence) -> tuple[str, str, str]:
 
 
 def _metadata_conflicts(items: list[Evidence]) -> list[ResearchConflict]:
-    conflicts: list[ResearchConflict] = []
-    by_key: dict[str, dict[str, list[str]]] = {}
-    for item in items:
-        key = item.metadata.get("fact_key")
-        value = item.metadata.get("fact_value")
-        if key is None or value is None:
-            continue
-        evidence_id = item.id or item.source_url or item.source
-        by_key.setdefault(str(key), {}).setdefault(str(value), []).append(str(evidence_id))
-
-    for key, values in by_key.items():
-        if len(values) <= 1:
-            continue
-        conflicts.append(
-            ResearchConflict(
-                fact_key=key,
-                values=sorted(values),
-                evidence_ids=sorted({item for group in values.values() for item in group}),
-                description=f"Conflicting evidence values for {key}.",
-            )
-        )
-    return conflicts
+    """委托给 app.rag.evidence 的唯一实现，保持既有内部调用点不变。"""
+    return detect_fact_conflicts(items)
 
 
 def _next_query(request: DeepSearchRequest, evaluation: DeepSearchEvaluation, round_number: int) -> str:
     if evaluation.follow_up_query:
         return evaluation.follow_up_query
+    if evaluation.conflicts:
+        # 冲突驱动的补搜：把冲突事实和它们的取值一起写进查询，让下一轮
+        # 去找能裁决分歧的权威来源，而不是泛泛地重复原查询。
+        conflict_terms = " ".join(
+            f"{conflict.fact_key} {' '.join(conflict.values)}".strip()
+            for conflict in evaluation.conflicts
+        )
+        return f"{request.query} {conflict_terms} 官方 最新 核实 第{round_number + 1}轮"
     if evaluation.missing_facts:
         missing = " ".join(evaluation.missing_facts)
-        return f"{request.query} {missing} latest official round {round_number + 1}"
-    return f"{request.query} follow-up round {round_number + 1}"
+        return f"{request.query} {missing} 官方 最新 第{round_number + 1}轮"
+    return f"{request.query} 补充检索 第{round_number + 1}轮"
 
 
 async def _call_search(
@@ -261,13 +249,36 @@ def _merge_conflicts(
     evaluator_conflicts: list[ResearchConflict],
     evidence: list[Evidence],
 ) -> list[ResearchConflict]:
-    merged = list(evaluator_conflicts)
-    existing_keys = {conflict.fact_key for conflict in merged}
-    for conflict in _metadata_conflicts(evidence):
-        if conflict.fact_key not in existing_keys:
-            merged.append(conflict)
-            existing_keys.add(conflict.fact_key)
-    return merged
+    return merge_fact_conflicts(evaluator_conflicts, evidence)
+
+
+def _escalate_conflicts(
+    evaluation: DeepSearchEvaluation,
+    conflicts: list[ResearchConflict],
+    chased_keys: set[str],
+) -> DeepSearchEvaluation:
+    """证据互相冲突时强制再补搜一轮。
+
+    改动前只有"完全没有证据"或评估器自己要求时才会进入下一轮，于是冲突
+    只被 _final_report 写成一条 warning 就收尾——Deep Search 在最需要它的
+    场景（来源互相打架、需要权威来源裁决）里恰恰不跑。
+
+    只追此前没追过的 fact_key：同一冲突追过一轮仍未消解，说明补搜裁决
+    不了它，再发同样的查询只是白烧一次工具调用；此时把冲突留在报告里
+    交给治理层降级。轮次和工具调用上限仍由调用方的硬上限兜住。
+    """
+    fresh_keys = [
+        conflict.fact_key for conflict in conflicts if conflict.fact_key not in chased_keys
+    ]
+    if not fresh_keys or evaluation.needs_follow_up:
+        return evaluation
+    return evaluation.model_copy(
+        update={
+            "needs_follow_up": True,
+            "conflicts": conflicts,
+            "missing_facts": list(dict.fromkeys([*evaluation.missing_facts, *fresh_keys])),
+        }
+    )
 
 
 def _ground_claims(claims: list[Claim], evidence: list[Evidence]) -> list[Claim]:
@@ -339,6 +350,8 @@ async def run_deep_search(
 
     query = request.query
     completed_query_set: set[str] = set()
+    # 已经驱动过一轮补搜的冲突 fact_key，避免同一冲突反复触发同样的查询。
+    chased_conflict_keys: set[str] = set()
     last_evaluation = DeepSearchEvaluation()
 
     while state.rounds < max_rounds:
@@ -421,6 +434,10 @@ async def run_deep_search(
         state.summary = last_evaluation.summary
         state.missing_facts = last_evaluation.missing_facts
         state.conflicts = _merge_conflicts(last_evaluation.conflicts, state.evidence)
+        last_evaluation = _escalate_conflicts(last_evaluation, state.conflicts, chased_conflict_keys)
+        if last_evaluation.needs_follow_up:
+            state.missing_facts = last_evaluation.missing_facts
+            chased_conflict_keys.update(conflict.fact_key for conflict in state.conflicts)
 
         if not last_evaluation.needs_follow_up:
             break

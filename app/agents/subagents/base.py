@@ -7,6 +7,7 @@ import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
+import jieba
 from pydantic import BaseModel, Field
 
 from app.agents.subagents.tool_policy import ToolPolicy
@@ -15,15 +16,41 @@ from app.agents.subagents.tools import (
     ProviderError,
     normalize_tool_result,
 )
+from app.rag.evidence import detect_fact_conflicts
 from app.research.deep_search import DeepSearchRequest, run_deep_search
 from app.schemas.events import EvidenceSufficiency
 from app.schemas.planning import Evidence, ResearchTask, TaskType, TravelRequirement
-from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport, SubagentResponse
+from app.schemas.research import (
+    Claim,
+    EvidenceBoundCandidate,
+    ResearchConflict,
+    ResearchReport,
+    SubagentResponse,
+)
 
 
 ToolBuilder = Callable[[TaskType], Awaitable[Iterable[Any]] | Iterable[Any]]
 DeepSearchRunner = Callable[..., Awaitable[ResearchReport]]
 EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+# 证据校验时忽略的虚词：模型改写语序时这些词的增删不改变事实内容。
+_STOPWORDS = frozenset(
+    {
+        "的", "了", "是", "在", "和", "与", "及", "或", "也", "都", "就", "还",
+        "有", "个", "这", "那", "其", "而", "并", "很", "会", "可", "可以", "需要",
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in",
+        "is", "it", "of", "on", "or", "the", "to", "with",
+    }
+)
+
+
+def _normalize_number(token: str) -> str:
+    """把 "55.0" 归一成 "55"，否则 estimated_cost 校验永远对不上证据里的 "55"。"""
+    try:
+        value = float(token)
+    except ValueError:
+        return token
+    return str(int(value)) if value == int(value) else token
 
 
 def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
@@ -125,15 +152,30 @@ class DomainSubagent:
         explicit_deep_search = task.research_mode == "deep"
         if explicit_deep_search and not self.allow_deep_search:
             warnings.append(f"Deep Search is not allowed for worker {self.worker}.")
-        should_run_deep_search = explicit_deep_search or (
-            (not evidence or partial_provider_seen)
-            and not sufficient_provider_found
+        # 证据互相冲突时也要走 Deep Search：provider 各自返回"开放/关闭"这类
+        # 矛盾事实时，此前只要有一个 provider 报 sufficient 就直接收尾，冲突
+        # 被原样传给分析层，最需要补搜裁决的场景恰恰不触发补搜。
+        conflicts = detect_fact_conflicts(evidence)
+        if conflicts:
+            warnings.extend(
+                f"Providers disagree on {conflict.fact_key}: {', '.join(conflict.values)}."
+                for conflict in conflicts
+            )
+        should_run_deep_search = (
+            explicit_deep_search
+            or bool(conflicts)
+            or ((not evidence or partial_provider_seen) and not sufficient_provider_found)
         )
+        if conflicts and not self.allow_deep_search:
+            warnings.append(
+                f"Evidence conflicts for {self.worker} are unresolved because Deep Search is not allowed."
+            )
         if should_run_deep_search and self.allow_deep_search:
             try:
                 research_report = await self._run_deep_search(
                     task,
                     requirement,
+                    conflicts=conflicts,
                     event_callback=event_callback,
                 )
             except Exception as exc:
@@ -340,9 +382,32 @@ class DomainSubagent:
 
     @staticmethod
     def _text_supported(text: str, evidence_text: str) -> bool:
-        normalized_text = " ".join(re.findall(r"\w+", text.casefold()))
-        normalized_evidence = " ".join(re.findall(r"\w+", evidence_text.casefold()))
-        return bool(normalized_text) and normalized_text in normalized_evidence
+        """判断文本是否被证据支持：要求其每个实词都出现在证据里。
+
+        改动前用的是整串子串匹配（``normalized_text in normalized_evidence``），
+        而 ``re.findall(r"\\w+")`` 对中文不切词——"熊猫基地上午开放"整段会变成
+        一个 token。于是只要模型改写了语序或加了标点（"上午开放的熊猫基地"），
+        子串就不成立，claims 和 candidates 会被全部丢弃：中文路径上
+        ``_ground_analysis`` 实际等于"删掉模型的所有输出"。
+
+        改为按 jieba 切词后做实词覆盖检查：语序和虚词可以变，但不允许出现
+        证据里没有的实词，因此仍然拦得住编造的价格、班次和营业状态。
+        """
+        text_tokens = DomainSubagent._content_tokens(text)
+        if not text_tokens:
+            return False
+        return text_tokens <= DomainSubagent._content_tokens(evidence_text)
+
+    @staticmethod
+    def _content_tokens(text: str) -> set[str]:
+        """切词并去掉标点与虚词，数字统一成整数写法便于与证据对齐。"""
+        tokens = set()
+        for token in jieba.cut(text.casefold()):
+            token = token.strip()
+            if not token or not re.search(r"\w", token) or token in _STOPWORDS:
+                continue
+            tokens.add(_normalize_number(token))
+        return tokens
 
     async def _invoke_provider(
         self,
@@ -398,6 +463,7 @@ class DomainSubagent:
         task: ResearchTask,
         requirement: TravelRequirement,
         *,
+        conflicts: list[ResearchConflict] | None = None,
         event_callback: EventCallback | None = None,
     ) -> ResearchReport | None:
         if not self.allow_deep_search:
@@ -439,10 +505,24 @@ class DomainSubagent:
             timeout_seconds=10.0,
             results_per_query=3,
         )
+        if conflicts:
+            # 第一轮就把冲突事实写进查询，否则要先白跑一轮原查询才轮到冲突补搜。
+            request = request.model_copy(
+                update={"query": self._conflict_query(task.query, conflicts)}
+            )
         kwargs: dict[str, Any] = {"search": search}
         if event_callback is not None and _supports_keyword(self._deep_search, "event_callback"):
             kwargs["event_callback"] = deep_search_event
         return await self._deep_search(request, **kwargs)
+
+    @staticmethod
+    def _conflict_query(base_query: str, conflicts: list[ResearchConflict]) -> str:
+        """把冲突事实及其取值拼进查询，引导补搜去找能裁决分歧的权威来源。"""
+        terms = " ".join(
+            f"{conflict.fact_key} {' '.join(conflict.values)}".strip()
+            for conflict in conflicts
+        )
+        return f"{base_query} {terms} 官方 最新 核实".strip()
 
     async def _tool_for(self, provider: str) -> Any | None:
         provider = self._canonical_provider(provider)

@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.rag.evidence import detect_fact_conflicts
 from app.schemas.planning import Evidence
 from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchConflict, SubagentResponse
 
@@ -266,25 +267,8 @@ class EvidenceGovernanceService:
 
     @staticmethod
     def _metadata_conflicts(items: list[Evidence]) -> list[ResearchConflict]:
-        by_key: dict[str, dict[str, list[str]]] = {}
-        for item in items:
-            fact_key = item.metadata.get("fact_key")
-            fact_value = item.metadata.get("fact_value")
-            if fact_key is None or fact_value is None:
-                continue
-            evidence_id = item.id or item.source_url or item.source
-            by_key.setdefault(str(fact_key), {}).setdefault(str(fact_value), []).append(str(evidence_id))
-        return [
-            ResearchConflict(
-                fact_key=fact_key,
-                values=sorted(values),
-                evidence_ids=sorted({evidence_id for group in groups.values() for evidence_id in group}),
-                description=f"Conflicting evidence values for {fact_key}.",
-            )
-            for fact_key, groups in by_key.items()
-            if len(groups) > 1
-            for values in [groups.keys()]
-        ]
+        """委托给 app.rag.evidence 的唯一实现，避免判定口径三处各说一套。"""
+        return detect_fact_conflicts(items)
 
     @staticmethod
     def _source_rank(evidence: Evidence) -> tuple[int, float]:

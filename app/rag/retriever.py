@@ -14,6 +14,10 @@ from app.rag.synonyms import expand_synonyms
 
 TITLE_WEIGHT_REPEAT = 3
 BIGRAM_BONUS = 0.5
+# 融合阶段保留的候选倍数：RRF 先留出比 k 更宽的池子，重排才有挑选空间。
+CANDIDATE_POOL_MULTIPLIER = 4
+# 同义词扩展只作为补充召回，权重低于原始查询词，避免顶掉精确命中。
+SYNONYM_WEIGHT = 0.3
 
 
 class HybridRetriever:
@@ -80,22 +84,24 @@ class HybridRetriever:
         混合检索
 
         流程：
-        1. BM25 检索 top-k（同义词扩展召回 + 相邻词组加分）
-        2. Dense 检索 top-k（失败时自动降级，不抛出异常）
-        3. RRF 融合
-        4. 返回融合后的 top-k
+        1. BM25 检索候选池（原始查询词 + 降权的同义词扩展 + 相邻词组加分）
+        2. Dense 检索候选池（失败时自动降级，不抛出异常）
+        3. RRF 融合，保留比 k 更宽的候选池
+        4. 重排并截断到 top-k
+        5. 回溯父文档
         """
+        pool_size = max(self.k * CANDIDATE_POOL_MULTIPLIER, self.k)
+
         # BM25 检索
         query_tokens = list(jieba.cut(query))
-        expanded_tokens = query_tokens + expand_synonyms(query_tokens)
-        bm25_raw_scores = self.bm25.get_scores(expanded_tokens)
+        bm25_scores = self._bm25_scores(query_tokens)
         bigram_bonus = self._bigram_scores(query_tokens)
-        bm25_scores = [score + bigram_bonus[i] for i, score in enumerate(bm25_raw_scores)]
+        bm25_scores = [score + bigram_bonus[i] for i, score in enumerate(bm25_scores)]
         bm25_top_indices = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
             reverse=True
-        )[:self.k * 2]
+        )[:pool_size]
         bm25_docs = [(self.documents[i], bm25_scores[i]) for i in bm25_top_indices]
         app_logger.debug(f"BM25 检索到 {len(bm25_docs)} 个候选")
 
@@ -104,25 +110,38 @@ class HybridRetriever:
         if self.vectorstore is not None:
             try:
                 dense_docs = self.vectorstore.similarity_search_with_score(
-                    query, k=self.k * 2, filter=metadata_filter
+                    query, k=pool_size, filter=metadata_filter
                 )
             except Exception as exc:
                 app_logger.warning(f"Dense 检索失败，本次查询退化为纯 BM25：{type(exc).__name__}: {exc}")
                 dense_docs = []
         app_logger.debug(f"Dense 检索到 {len(dense_docs)} 个候选")
 
-        # RRF 融合
-        fused_docs = self._rrf_fusion(bm25_docs, dense_docs, k=60)
-        app_logger.info(f"✅ 混合检索完成，返回 {len(fused_docs)} 个结果")
+        # RRF 融合：保留宽候选池，让重排器有挑选空间而不只是调序
+        fused_docs = self._rrf_fusion(bm25_docs, dense_docs, k=60, limit=pool_size)
         if self.reranker:
-            fused_docs = self.reranker.rerank(query, fused_docs, top_k=self.k)
-        return self._resolve_parent_documents(fused_docs)
+            # 重排整个候选池而非仅 top-k：父文档折叠会合并候选，
+            # 需要多余的候选来把结果补齐到 k。
+            fused_docs = self.reranker.rerank(query, fused_docs, top_k=pool_size)
+        resolved = self._resolve_parent_documents(fused_docs)
+        app_logger.info(f"✅ 混合检索完成，返回 {len(resolved)} 个结果")
+        return resolved
+
+    def _bm25_scores(self, query_tokens: List[str]) -> List[float]:
+        """原始查询词全权重，同义词扩展按 SYNONYM_WEIGHT 降权后叠加。"""
+        scores = list(self.bm25.get_scores(query_tokens))
+        synonym_tokens = expand_synonyms(query_tokens)
+        if not synonym_tokens:
+            return scores
+        synonym_scores = self.bm25.get_scores(synonym_tokens)
+        return [score + SYNONYM_WEIGHT * synonym_scores[i] for i, score in enumerate(scores)]
 
     def _rrf_fusion(
             self,
             bm25_docs: List[Tuple[Document, float]],
             dense_docs: List[Tuple[Document, float]],
-            k: int = 60
+            k: int = 60,
+            limit: int | None = None,
     ) -> List[Document]:
         """倒数排名融合（RRF）"""
         scores = {}
@@ -137,9 +156,11 @@ class HybridRetriever:
 
         all_docs = {chunk_id(doc): doc for doc, _ in bm25_docs + dense_docs}
         sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return [all_docs[doc_id] for doc_id, _ in sorted_docs[:self.k]]
+        cutoff = self.k if limit is None else limit
+        return [all_docs[doc_id] for doc_id, _ in sorted_docs[:cutoff]]
 
     def _resolve_parent_documents(self, documents: List[Document]) -> List[Document]:
+        """把命中的子块换成父文档；多个子块折叠到同一父文档时按顺序补齐到 k。"""
         if not self.parent_documents:
             return documents[:self.k]
 
@@ -149,7 +170,17 @@ class HybridRetriever:
             parent_id = str(document.metadata.get("parent_id", ""))
             parent = self.parent_documents.get(parent_id, document)
             key = chunk_id(parent)
-            if key not in seen:
-                resolved.append(parent)
-                seen.add(key)
-        return resolved[:self.k]
+            if key in seen:
+                continue
+            # 子块上的重排分数在换成父文档后会丢失，这里显式传递下去。
+            rerank_score = document.metadata.get("rerank_score")
+            if rerank_score is not None and parent.metadata.get("rerank_score") != rerank_score:
+                parent = Document(
+                    page_content=parent.page_content,
+                    metadata={**parent.metadata, "rerank_score": rerank_score},
+                )
+            resolved.append(parent)
+            seen.add(key)
+            if len(resolved) >= self.k:
+                break
+        return resolved

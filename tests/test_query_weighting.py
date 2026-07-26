@@ -1,5 +1,6 @@
 from langchain_core.documents import Document
 
+from app.rag.reranker import RelevanceReranker
 from app.rag.retriever import HybridRetriever
 from app.rag.synonyms import expand_synonyms
 
@@ -85,3 +86,118 @@ def test_bigram_match_boosts_exact_phrase_over_scattered_terms():
     result = retriever.retrieve("住宿环境")
 
     assert result[0].metadata["chunk_id"] == "exact"
+
+
+def test_exact_term_match_outranks_synonym_only_match():
+    # 同义词扩展必须降权，否则 "宾馆" 与 "酒店" 权重相同。这里 synonym_only
+    # 特意把同义词 "宾馆" 重复三次以抬高其词频，而 exact 只出现一次 "酒店"。
+    # 若扩展词与原始查询词等权（改动前的行为），synonym_only 会凭更高词频
+    # 反超；只有扩展词被 SYNONYM_WEIGHT 降权后 exact 才能保持第一。
+    #
+    # decoy 是必需的第三篇文档：命中词只出现在 1/2 篇文档时 rank_bm25 的
+    # IDF 精确为 0，会把全部词频信号乘没。
+    exact = Document(page_content="市中心酒店交通便利。", metadata={"chunk_id": "exact"})
+    synonym_only = Document(
+        page_content="宾馆环境安静，宾馆价格实惠，宾馆位置也好。",
+        metadata={"chunk_id": "synonym"},
+    )
+    decoy = Document(page_content="熊猫基地全年开放。", metadata={"chunk_id": "decoy"})
+    retriever = HybridRetriever(None, [exact, synonym_only, decoy], k=3)
+
+    result = retriever.retrieve("酒店")
+
+    assert result[0].metadata["chunk_id"] == "exact"
+    # 同义词仍要能召回，只是排在精确命中之后。
+    assert [doc.metadata["chunk_id"] for doc in result[:2]] == ["exact", "synonym"]
+
+
+def test_reranker_can_promote_a_candidate_outside_the_bm25_top_k():
+    # 改动前 RRF 在融合处就截断到 k，重排器只能对这 k 篇调序、无法把
+    # 第 k+1 篇提上来。这里让 BM25 与重排器的偏好真正冲突：
+    #   partial 只覆盖 1/3 查询词（"门票"）但词频极高、文档极短，BM25 排第一；
+    #   full 覆盖全部三个查询词但每词各一次且被填充文本稀释，BM25 排第二。
+    # 重排器用的是词项覆盖率，因此偏好 full（1.0）而非 partial（0.333）。
+    # k=1 时：若融合仍提前截断，重排器只会看到 partial，返回 partial；
+    # 只有保留宽候选池后 full 才进得了重排输入并被提为第一。
+    #
+    # noise 的作用是压低 "熊猫"/"基地" 的 IDF，让只命中 "门票" 的 partial
+    # 能在 BM25 上真正超过覆盖全部词的 full；措辞特意避免出现连续的
+    # "熊猫基地"，否则 noise 会拿到相邻词组加分而挤掉 full。
+    noise = [
+        Document(
+            page_content=f"熊猫很多，基地第{index}片区绿化良好。",
+            metadata={"chunk_id": f"noise-{index}"},
+        )
+        for index in range(6)
+    ]
+    partial = Document(page_content="门票" * 10 + "说明。", metadata={"chunk_id": "partial"})
+    full = Document(
+        page_content="熊猫很可爱，基地面积大，门票要预约。" + "园区导览讲解安排若干。" * 6,
+        metadata={"chunk_id": "full"},
+    )
+    retriever = HybridRetriever(
+        None,
+        [partial, full, *noise],
+        k=1,
+        reranker=RelevanceReranker(),
+    )
+
+    result = retriever.retrieve("熊猫基地门票")
+
+    assert [doc.metadata["chunk_id"] for doc in result] == ["full"]
+
+
+def test_parent_resolution_backfills_to_k_when_children_share_a_parent():
+    # 两个子块共享同一父文档，折叠后只剩 1 篇。改动前按 [:k] 返回会让结果
+    # 缩水到 1；补齐机制应继续消费候选，把第二个父文档也带上，凑满 k=2。
+    shared_parent = Document(
+        page_content="宽窄巷子完整介绍。",
+        metadata={"parent_id": "p1", "chunk_id": "p1"},
+    )
+    other_parent = Document(
+        page_content="熊猫基地完整介绍。",
+        metadata={"parent_id": "p2", "chunk_id": "p2"},
+    )
+    children = [
+        Document(page_content="宽窄巷子位于青羊区。", metadata={"chunk_id": "c1", "parent_id": "p1"}),
+        Document(page_content="宽窄巷子适合散步。", metadata={"chunk_id": "c2", "parent_id": "p1"}),
+        Document(page_content="熊猫基地位于成华区。", metadata={"chunk_id": "c3", "parent_id": "p2"}),
+    ]
+    retriever = HybridRetriever(
+        None,
+        children,
+        k=2,
+        parent_documents=[shared_parent, other_parent],
+    )
+
+    result = retriever.retrieve("宽窄巷子")
+
+    assert len(result) == 2
+    assert {doc.metadata["parent_id"] for doc in result} == {"p1", "p2"}
+
+
+def test_parent_documents_carry_the_child_rerank_score():
+    # rerank_score 由重排器写在子块副本上；换成父文档后必须显式传递，
+    # 否则下游拿不到相关性分。
+    parent = Document(
+        page_content="宽窄巷子完整介绍。",
+        metadata={"parent_id": "p1", "chunk_id": "p1"},
+    )
+    child = Document(
+        page_content="宽窄巷子位于青羊区。",
+        metadata={"chunk_id": "c1", "parent_id": "p1"},
+    )
+    retriever = HybridRetriever(
+        None,
+        [child],
+        k=1,
+        parent_documents=[parent],
+        reranker=RelevanceReranker(),
+    )
+
+    result = retriever.retrieve("宽窄巷子")
+
+    assert result[0].metadata["parent_id"] == "p1"
+    assert "rerank_score" in result[0].metadata
+    # 父文档对象本身不能被就地污染。
+    assert "rerank_score" not in parent.metadata
