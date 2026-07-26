@@ -85,6 +85,72 @@ def test_governance_deduplicates_evidence_and_keeps_claim_bindings():
     assert any("duplicate" in warning.lower() for warning in reviewed.warnings)
 
 
+def test_governance_remaps_all_duplicate_ids_to_final_preferred_evidence():
+    fallback = Evidence(
+        id="ev-a",
+        content="Museum requires advance booking.",
+        source="fallback",
+        source_url="https://example.test/museum",
+    )
+    search = Evidence(
+        id="ev-b",
+        content="Museum requires advance booking.",
+        source="search",
+        source_url="https://example.test/museum",
+    )
+    official = Evidence(
+        id="ev-c",
+        content="Museum requires advance booking.",
+        source="official",
+        source_url="https://example.test/museum",
+    )
+
+    reviewed = EvidenceGovernanceService().review(
+        [
+            _response(
+                claims=[Claim(text="Museum requires advance booking.", evidence_ids=["ev-a"])],
+                candidates=[EvidenceBoundCandidate(name="Museum", evidence_ids=["ev-a"])],
+                evidence=[fallback, search, official],
+            )
+        ]
+    )
+
+    assert [item.id for item in reviewed.evidence] == ["ev-c"]
+    assert reviewed.claims[0].evidence_ids == ["ev-c"]
+    assert reviewed.candidates[0].evidence_ids == ["ev-c"]
+
+
+def test_governance_normalizes_naive_valid_until_before_expiry_check():
+    now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    expired_naive = Evidence(
+        id="ev-naive-expired",
+        content="Seasonal closure ended yesterday.",
+        source="official",
+        valid_until=datetime(2026, 8, 1, 11),
+    )
+    current_naive = Evidence(
+        id="ev-naive-current",
+        content="Museum is open this afternoon.",
+        source="official",
+        valid_until=datetime(2026, 8, 1, 13),
+    )
+
+    reviewed = EvidenceGovernanceService(now=now).review(
+        [
+            _response(
+                claims=[
+                    Claim(text="Expired naive claim", evidence_ids=["ev-naive-expired"]),
+                    Claim(text="Current naive claim", evidence_ids=["ev-naive-current"]),
+                ],
+                evidence=[expired_naive, current_naive],
+            )
+        ]
+    )
+
+    assert [item.id for item in reviewed.evidence] == ["ev-naive-current"]
+    assert [claim.text for claim in reviewed.claims] == ["Current naive claim"]
+
+
 def test_governance_preserves_conflicts_and_warnings_without_resolving_them():
     conflict = ResearchConflict(
         fact_key="museum-hours",

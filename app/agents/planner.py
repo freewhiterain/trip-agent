@@ -4,11 +4,7 @@ from app.schemas.planning import ResearchTask, TravelRequirement
 
 
 def create_research_plan(requirement: TravelRequirement) -> list[ResearchTask]:
-    """生成带依赖关系的研究任务 DAG。
-
-    第一组（并行）：目的地、天气——互不依赖；
-    第二组（并行）：交通、住宿、美食——依赖目的地研究结论。
-    """
+    """Generate one single parallel group of five independent research tasks."""
     destination = requirement.destination
     common_criteria = ["返回结构化候选项", "事实结论附带 Evidence", "缺失实时数据时明确降级"]
 

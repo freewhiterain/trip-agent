@@ -113,7 +113,8 @@ class EvidenceGovernanceService:
         evidence_by_key: dict[str, Evidence] = {}
         order_by_key: dict[str, int] = {}
         key_by_evidence_id: dict[str, str] = {}
-        now = self._now or datetime.now(timezone.utc)
+        evidence_ids_by_key: dict[str, set[str]] = {}
+        now = self._as_aware_utc(self._now or datetime.now(timezone.utc))
 
         for response in responses:
             evidence_items = list(response.evidence)
@@ -125,7 +126,14 @@ class EvidenceGovernanceService:
                     warnings.append(f"Dropped evidence without id for task {response.task_id}.")
                     continue
                 key = self._dedupe_key(evidence)
-                if evidence.valid_until is not None and evidence.valid_until < now:
+                valid_until = (
+                    self._as_aware_utc(evidence.valid_until)
+                    if evidence.valid_until is not None
+                    else None
+                )
+                if valid_until is not None:
+                    evidence = evidence.model_copy(update={"valid_until": valid_until})
+                if valid_until is not None and valid_until < now:
                     id_remap[evidence.id] = None
                     warnings.append(f"Dropped expired evidence {evidence.id} for task {response.task_id}.")
                     continue
@@ -139,15 +147,16 @@ class EvidenceGovernanceService:
                 if existing is None:
                     evidence_by_key[key] = evidence
                     order_by_key[key] = len(order_by_key)
+                    evidence_ids_by_key[key] = {evidence.id}
                     id_remap[evidence.id] = evidence.id
                     continue
 
+                evidence_ids_by_key.setdefault(key, set()).add(evidence.id)
                 preferred = self._preferred_evidence(existing, evidence)
                 evidence_by_key[key] = preferred
                 kept_id = preferred.id
-                id_remap[evidence.id] = kept_id
-                if existing.id:
-                    id_remap[existing.id] = kept_id
+                for duplicate_id in evidence_ids_by_key[key]:
+                    id_remap[duplicate_id] = kept_id
                 warnings.append(
                     f"Deduplicated evidence {evidence.id} into {kept_id} for task {response.task_id}."
                 )
@@ -165,6 +174,12 @@ class EvidenceGovernanceService:
     @staticmethod
     def _source_rank(evidence: Evidence) -> tuple[int, float]:
         return (SOURCE_RANKS.get(evidence.source.lower(), 99), -evidence.confidence)
+
+    @staticmethod
+    def _as_aware_utc(value: datetime) -> datetime:
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _preferred_evidence(self, current: Evidence, candidate: Evidence) -> Evidence:
         if self._source_rank(candidate) < self._source_rank(current):

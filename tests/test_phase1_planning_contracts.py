@@ -48,6 +48,11 @@ def test_planner_creates_single_parallel_group_for_confirmed_destination():
     ]
 
 
+def test_planner_docstring_describes_single_independent_task_group():
+    assert "single parallel group" in create_research_plan.__doc__
+    assert "five independent" in create_research_plan.__doc__
+
+
 def test_parallel_groups_respects_dependencies():
     first = ResearchTask(task_type="attractions", query="attractions")
     second = ResearchTask(task_type="hotel", query="hotel", dependencies=[first.id])

@@ -165,9 +165,7 @@ def _subagent_response_to_worker_result(
     is_mock: bool = False,
 ) -> WorkerResult:
     reviewed = (governance or EvidenceGovernanceService()).review([response])
-    summary = response.summary
-    if not summary and response.research_report is not None:
-        summary = response.research_report.summary
+    summary = _governed_summary(response, reviewed)
     return WorkerResult(
         task_id=response.task_id,
         worker=response.worker,
@@ -178,6 +176,22 @@ def _subagent_response_to_worker_result(
         warnings=reviewed.warnings,
         is_mock=is_mock,
     )
+
+
+def _governed_summary(response: SubagentResponse, reviewed) -> str:
+    if response.status == "failed":
+        return response.summary or "Domain subagent execution failed."
+    if reviewed.claims:
+        return " ".join(claim.text for claim in reviewed.claims)
+    if reviewed.candidates:
+        candidate_count = len(reviewed.candidates)
+        noun = "candidate" if candidate_count == 1 else "candidates"
+        return f"{candidate_count} evidence-governed {noun} retained."
+    if reviewed.evidence:
+        evidence_count = len(reviewed.evidence)
+        noun = "evidence item" if evidence_count == 1 else "evidence items"
+        return f"{evidence_count} {noun} retained; no evidence-bound claims retained."
+    return "No evidence-governed claims retained."
 
 
 def _coerce_subagent_response(result: Any, task: ResearchTask) -> SubagentResponse:
@@ -404,15 +418,16 @@ def create_supervisor_graph(
             raw_result = await registry.run(task, requirement)
             is_mock = isinstance(raw_result, WorkerResult) and raw_result.is_mock
             response = _coerce_subagent_response(raw_result, task)
+            result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
         except Exception as exc:
-            response = SubagentResponse(
+            result = WorkerResult(
                 task_id=task.id,
                 worker=task.task_type,
                 status="failed",
                 summary="Domain subagent execution failed.",
                 warnings=[f"{type(exc).__name__}: {exc}"],
+                is_mock=is_mock,
             )
-        result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
         await emit(state, "worker_completed", result.model_dump(mode="json"))
         if result.evidence:
             await emit(state, "evidence_collected", {"task_id": task.id, "count": len(result.evidence)})

@@ -4,7 +4,11 @@ import pytest
 
 from app.agents.planner import create_research_plan, parallel_groups
 from app.agents.subagents.registry import SubagentRegistry
-from app.agents.supervisor import merge_worker_results, run_travel_planning
+from app.agents.supervisor import (
+    _subagent_response_to_worker_result,
+    merge_worker_results,
+    run_travel_planning,
+)
 from app.schemas.planning import Evidence, ResearchTask, TravelRequirement
 from app.schemas.research import Claim, EvidenceBoundCandidate, SubagentResponse
 
@@ -45,6 +49,25 @@ def test_supervisor_replaces_retry_result_for_same_task_id():
     assert merged["task-a"]["status"] == "completed"
 
 
+def test_worker_result_summary_uses_only_governed_claims():
+    response = SubagentResponse(
+        task_id="task-a",
+        worker="attractions",
+        status="completed",
+        summary="Unsupported summary should not reach synthesis.",
+        claims=[
+            Claim(text="Supported museum fact.", evidence_ids=["ev-supported"]),
+            Claim(text="Unsupported museum fact.", evidence_ids=["missing"]),
+        ],
+        evidence=[Evidence(id="ev-supported", content="Museum source text.", source="official")],
+    )
+
+    result = _subagent_response_to_worker_result(response)
+
+    assert result.summary == "Supported museum fact."
+    assert "Unsupported" not in result.summary
+
+
 def test_confirmed_destination_plan_creates_five_independent_tasks():
     tasks = create_research_plan(_requirement())
 
@@ -56,6 +79,21 @@ def test_confirmed_destination_plan_creates_five_independent_tasks():
 class FailingWeatherSubagent:
     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> SubagentResponse:
         raise RuntimeError("weather provider crashed")
+
+
+class MalformedAttractionsSubagent:
+    async def run(self, task: ResearchTask, requirement: TravelRequirement) -> SubagentResponse:
+        return SubagentResponse.model_construct(
+            task_id=task.id,
+            worker=task.task_type,
+            status="completed",
+            summary="malformed attractions response",
+            claims=[object()],
+            candidates=[],
+            evidence=[],
+            research_report=None,
+            warnings=[],
+        )
 
 
 class StaticSubagent:
@@ -90,3 +128,24 @@ async def test_subagent_failure_does_not_stop_other_branches():
     assert set(results) == {"attractions", "transport", "hotel", "food", "weather"}
     assert results["weather"].status == "failed"
     assert all(results[worker].status == "completed" for worker in {"attractions", "transport", "hotel", "food"})
+
+
+@pytest.mark.asyncio
+async def test_governance_failure_does_not_stop_other_branches():
+    shared = StaticSubagent()
+    registry = SubagentRegistry(
+        {
+            "attractions": MalformedAttractionsSubagent(),
+            "transport": shared,
+            "hotel": shared,
+            "food": shared,
+            "weather": shared,
+        }
+    )
+
+    draft = await run_travel_planning(_requirement(), registry)
+    results = {result.worker: result for result in draft.worker_results}
+
+    assert set(results) == {"attractions", "transport", "hotel", "food", "weather"}
+    assert results["attractions"].status == "failed"
+    assert all(results[worker].status == "completed" for worker in {"transport", "hotel", "food", "weather"})
