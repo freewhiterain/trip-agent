@@ -116,3 +116,37 @@ Concerns:
 
 - Pre-existing unrelated `.superpowers/sdd` deletions/modifications were present before this fix work and were not touched or staged.
 - Test warnings are dependency deprecation warnings from `langgraph`/`jieba`, not Task 5 failures.
+
+## Fix implementation follow-up round 2
+
+Addressed the remaining Task 5 re-review finding:
+
+- Added a red regression for a schema-valid failed `SubagentResponse` whose raw summary contains unsupported factual text.
+- Updated failed worker summary governance so failed responses always use the fixed non-factual summary `"Domain subagent execution failed."`.
+- Left diagnostic details in `warnings`, which remain the only diagnostic channel used by the converted `WorkerResult`.
+
+Red verification:
+
+```text
+.venv\Scripts\python.exe -m pytest tests/test_supervisor_subagent_merge.py::test_failed_worker_result_summary_uses_fixed_non_factual_text -q
+1 failed, 1 warning
+```
+
+Green verification:
+
+```text
+.venv\Scripts\python.exe -m pytest tests/test_supervisor_subagent_merge.py::test_failed_worker_result_summary_uses_fixed_non_factual_text -q
+1 passed, 1 warning
+```
+
+Full focused Task 5 verification:
+
+```text
+.venv\Scripts\python.exe -m pytest tests/test_evidence_governance.py tests/test_supervisor_subagent_merge.py tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py -q
+21 passed, 2 warnings
+```
+
+Concerns:
+
+- Pre-existing unrelated `.superpowers/sdd` deletions/modifications remain outside this fix scope.
+- Test warnings are dependency deprecation warnings from `langgraph`/`jieba`, not Task 5 failures.

@@ -180,7 +180,7 @@ def _subagent_response_to_worker_result(
 
 def _governed_summary(response: SubagentResponse, reviewed) -> str:
     if response.status == "failed":
-        return response.summary or "Domain subagent execution failed."
+        return "Domain subagent execution failed."
     if reviewed.claims:
         return " ".join(claim.text for claim in reviewed.claims)
     if reviewed.candidates:

@@ -68,6 +68,22 @@ def test_worker_result_summary_uses_only_governed_claims():
     assert "Unsupported" not in result.summary
 
 
+def test_failed_worker_result_summary_uses_fixed_non_factual_text():
+    response = SubagentResponse(
+        task_id="task-a",
+        worker="attractions",
+        status="failed",
+        summary="Unsupported factual summary: Panda Base tickets are sold out today.",
+        warnings=["TimeoutError: attractions provider crashed"],
+    )
+
+    result = _subagent_response_to_worker_result(response)
+
+    assert result.summary == "Domain subagent execution failed."
+    assert "Panda Base tickets" not in result.summary
+    assert result.warnings == ["TimeoutError: attractions provider crashed"]
+
+
 def test_confirmed_destination_plan_creates_five_independent_tasks():
     tasks = create_research_plan(_requirement())
 
