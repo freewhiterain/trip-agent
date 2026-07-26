@@ -9,6 +9,8 @@ from functools import lru_cache
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUPPORTED_TRAVEL_AGENT_MODES = {"supervisor", "supervisor_subagents"}
+DEGRADED_PLANNING_REASON = "no_llm_or_provider"
+DEGRADED_PLANNING_MARKER = "planning_degraded:no_llm_or_provider"
 
 # ======== 环境兼容性修复（课件没有，但本地环境必需） ========
 # 问题：本机开了代理（如 Clash 端口 7897），代理会把发往阿里云国内服务的请求

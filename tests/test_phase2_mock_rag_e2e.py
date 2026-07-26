@@ -100,11 +100,10 @@ async def test_confirmed_form_runs_supervisor_once_across_five_category_scoped_w
 
     calls = []
     real_run_travel_planning = tools.run_travel_planning
-    registry = build_local_registry(LocalKnowledgeService())
 
     async def counting_run_travel_planning(requirement, **kwargs):
         calls.append(requirement)
-        return await real_run_travel_planning(requirement, registry=registry, **kwargs)
+        return await real_run_travel_planning(requirement, **kwargs)
 
     monkeypatch.setattr(tools, "run_travel_planning", counting_run_travel_planning, raising=False)
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TaskType = Literal["attractions", "transport", "hotel", "food", "weather"]
 WorkerStatus = Literal["completed", "partial", "unavailable", "failed"]
+PlanningStatus = Literal["draft", "degraded"]
 
 
 class TravelRequirement(BaseModel):
@@ -151,4 +152,5 @@ class TravelPlanDraft(BaseModel):
     worker_results: list[WorkerResult]
     evidence: list[Evidence]
     warnings: list[str] = Field(default_factory=list)
-    status: Literal["draft"] = "draft"
+    status: PlanningStatus = "draft"
+    degraded_reason: Literal["no_llm_or_provider"] | None = None

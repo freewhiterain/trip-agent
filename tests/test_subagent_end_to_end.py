@@ -150,10 +150,10 @@ async def test_factory_accepts_supervisor_subagents_mode_and_builds_supervisor_g
 
     def create_registry():
         calls.append("registry")
-        return FakeRegistry()
+        return FakeRegistry(), None
 
     monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor_subagents")
-    monkeypatch.setattr(supervisor, "create_default_subagent_registry", create_registry)
+    monkeypatch.setattr(factory, "create_planning_registry", create_registry)
 
     graph = await factory.create_chat_agent()
 
@@ -167,14 +167,22 @@ async def test_factory_preserves_supervisor_mode_compatibility(monkeypatch):
     from app.agents import supervisor
 
     sentinel = object()
+    captured = {}
 
-    async def create_supervisor_agent():
+    def create_graph(*, registry):
+        captured["registry"] = registry
         return sentinel
 
+    class FakeRegistry:
+        async def run(self, task, requirement):
+            raise AssertionError("compatibility test should not execute graph workers")
+
     monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor")
-    monkeypatch.setattr(supervisor, "create_supervisor_agent", create_supervisor_agent)
+    monkeypatch.setattr(factory, "create_planning_registry", lambda: (FakeRegistry(), None))
+    monkeypatch.setattr(supervisor, "create_supervisor_graph", create_graph)
 
     assert await factory.create_chat_agent() is sentinel
+    assert isinstance(captured["registry"], FakeRegistry)
 
 
 @pytest.mark.asyncio

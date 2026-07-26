@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.agents.supervisor import run_travel_planning
+from app.agents import factory as agent_factory
 from app.api.dependencies import get_current_user
 from app.core.checkpointer import get_checkpointer
 from app.governance.approvals import ApprovalService
@@ -25,6 +25,11 @@ from app.schemas.planning import TravelRequirement
 from app.utils.logger import app_logger
 
 router = APIRouter(tags=["旅行规划任务"])
+
+
+async def run_travel_planning(*args, **kwargs):
+    """Compatibility seam for tests and callers replacing the planning runner."""
+    return await agent_factory.run_travel_planning(*args, **kwargs)
 
 
 @router.post("/tasks")

@@ -1,17 +1,81 @@
-"""旅行 Agent 运行模式选择。"""
+"""Mode-aware planning factories."""
 
-from app.config import SUPPORTED_TRAVEL_AGENT_MODES, settings
+from typing import Any
+
+from app.config import (
+    DEGRADED_PLANNING_MARKER,
+    DEGRADED_PLANNING_REASON,
+    SUPPORTED_TRAVEL_AGENT_MODES,
+    settings,
+)
 
 
-async def create_chat_agent():
-    """创建规划 Agent；旧 Handoffs 流程已退役，统一走 Supervisor。"""
+def _travel_agent_mode() -> str:
     mode = settings.travel_agent_mode.strip().lower()
     if mode not in SUPPORTED_TRAVEL_AGENT_MODES:
         raise ValueError(
-            f"TRAVEL_AGENT_MODE={settings.travel_agent_mode} 已不受支持,"
-            "旧 Handoffs 流程已由对话协调器 + Supervisor 取代,"
-            "请使用 supervisor 或 supervisor_subagents 模式。"
+            f"TRAVEL_AGENT_MODE={settings.travel_agent_mode} is unsupported; "
+            "use supervisor or supervisor_subagents."
         )
-    from app.agents.supervisor import create_supervisor_agent
+    return mode
 
-    return await create_supervisor_agent()
+
+def create_planning_registry() -> tuple[Any, str | None]:
+    """Select the registry used by real planning requests.
+
+    The legacy registry remains the default-compatible path. Subagents require
+    an LLM configuration; without one, fallback is explicit and observable.
+    """
+    from app.agents.subagents.registry import create_default_subagent_registry
+    from app.agents.workers.registry import create_default_registry
+
+    mode = _travel_agent_mode()
+    if mode == "supervisor":
+        return create_default_registry(), None
+
+    if not settings.dashscope_api_key.strip():
+        reason = DEGRADED_PLANNING_REASON
+        if settings.allow_legacy_fallback:
+            return create_default_registry(), reason
+        return create_default_subagent_registry(llm=None), reason
+
+    try:
+        from app.agents.llm import get_llm
+
+        llm = get_llm()
+    except Exception:
+        if settings.allow_legacy_fallback:
+            return create_default_registry(), DEGRADED_PLANNING_REASON
+        return create_default_subagent_registry(llm=None), DEGRADED_PLANNING_REASON
+    return create_default_subagent_registry(llm=llm), None
+
+
+async def run_travel_planning(requirement, **kwargs):
+    """Run planning through the configured production registry."""
+    from app.agents.supervisor import run_travel_planning as supervisor_runner
+
+    registry = kwargs.pop("registry", None)
+    fallback_reason = None
+    if registry is None:
+        registry, fallback_reason = create_planning_registry()
+
+    draft = await supervisor_runner(requirement, registry=registry, **kwargs)
+    if fallback_reason is None:
+        return draft
+
+    warnings = list(dict.fromkeys([*draft.warnings, DEGRADED_PLANNING_MARKER]))
+    return draft.model_copy(
+        update={
+            "status": "degraded",
+            "degraded_reason": fallback_reason,
+            "warnings": warnings,
+        }
+    )
+
+
+async def create_chat_agent():
+    """Create a graph with the registry selected for the configured mode."""
+    registry, _fallback_reason = create_planning_registry()
+    from app.agents.supervisor import create_supervisor_graph
+
+    return create_supervisor_graph(registry=registry)

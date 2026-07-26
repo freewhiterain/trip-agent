@@ -8,7 +8,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from app.agents.supervisor import run_travel_planning
+from app.agents import factory as agent_factory
 from app.api.dependencies import get_current_user
 from app.core.checkpointer import get_checkpointer
 from app.governance.events import PublishingEventRepository, TaskEventService, task_event_to_sse_event
@@ -26,6 +26,11 @@ from app.services.planning import render_plan_markdown
 
 router = APIRouter(prefix="/chat/tools", tags=["chat tools"])
 PROCESSING_LEASE_TIMEOUT = timedelta(minutes=2)
+
+
+async def run_travel_planning(*args, **kwargs):
+    """Compatibility seam for tests and callers replacing the planning runner."""
+    return await agent_factory.run_travel_planning(*args, **kwargs)
 
 
 class ProcessingLeaseLostError(RuntimeError):
