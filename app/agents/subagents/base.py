@@ -18,6 +18,18 @@ from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport, 
 
 ToolBuilder = Callable[[TaskType], Awaitable[Iterable[Any]] | Iterable[Any]]
 DeepSearchRunner = Callable[..., Awaitable[ResearchReport]]
+EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+    return keyword in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 class SubagentAnalysis(BaseModel):
@@ -66,6 +78,8 @@ class DomainSubagent:
         self,
         task: ResearchTask,
         requirement: TravelRequirement,
+        *,
+        event_callback: EventCallback | None = None,
     ) -> SubagentResponse:
         """Run provider fallback and return only structured, grounded facts."""
 
@@ -84,6 +98,7 @@ class DomainSubagent:
                 provider,
                 task,
                 requirement,
+                event_callback=event_callback,
             )
             warnings.extend(provider_warnings)
             if provider_evidence:
@@ -92,7 +107,11 @@ class DomainSubagent:
 
         if not evidence and self.allow_deep_search:
             try:
-                research_report = await self._run_deep_search(task, requirement)
+                research_report = await self._run_deep_search(
+                    task,
+                    requirement,
+                    event_callback=event_callback,
+                )
             except Exception as exc:
                 warnings.append(f"Deep Search failed: {type(exc).__name__}.")
                 research_report = ResearchReport(
@@ -298,6 +317,8 @@ class DomainSubagent:
         provider: str,
         task: ResearchTask,
         requirement: TravelRequirement,
+        *,
+        event_callback: EventCallback | None = None,
     ) -> tuple[list[Evidence], list[str]]:
         tool = await self._tool_for(provider)
         if tool is None:
@@ -305,6 +326,14 @@ class DomainSubagent:
 
         payload = self._provider_payload(provider, task, requirement)
         try:
+            if event_callback is not None:
+                await event_callback(
+                    "subagent_tool_called",
+                    {
+                        "tool_name": getattr(tool, "name", None) or provider,
+                        "round_number": 1,
+                    },
+                )
             raw_result = await self._call_tool(tool, payload)
         except Exception as exc:
             raw_result = exc
@@ -319,6 +348,8 @@ class DomainSubagent:
         self,
         task: ResearchTask,
         requirement: TravelRequirement,
+        *,
+        event_callback: EventCallback | None = None,
     ) -> ResearchReport | None:
         if not self.allow_deep_search:
             return None
@@ -341,6 +372,16 @@ class DomainSubagent:
                 "deep_research",
             )
 
+        async def deep_search_event(event_type: str, payload: dict[str, Any]) -> None:
+            if event_callback is not None:
+                await event_callback(
+                    event_type,
+                    {
+                        "tool_name": getattr(search_provider, "name", None) or "search_mcp",
+                        **payload,
+                    },
+                )
+
         request = DeepSearchRequest.from_task(
             task,
             tool_policy=self.policy,
@@ -349,7 +390,10 @@ class DomainSubagent:
             timeout_seconds=10.0,
             results_per_query=3,
         )
-        return await self._deep_search(request, search=search)
+        kwargs: dict[str, Any] = {"search": search}
+        if event_callback is not None and _supports_keyword(self._deep_search, "event_callback"):
+            kwargs["event_callback"] = deep_search_event
+        return await self._deep_search(request, **kwargs)
 
     async def _tool_for(self, provider: str) -> Any | None:
         provider = self._canonical_provider(provider)

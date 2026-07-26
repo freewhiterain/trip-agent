@@ -17,6 +17,7 @@ from app.schemas.research import Claim, ResearchConflict, ResearchReport
 
 
 SearchFunction = Callable[[str, int], Awaitable[list[Evidence]]]
+EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 HARD_MAX_ROUNDS = 3
 HARD_MAX_TOOL_CALLS = 5
@@ -308,6 +309,7 @@ async def run_deep_search(
     search: SearchFunction,
     evaluator: Any | None = None,
     now: datetime | None = None,
+    event_callback: EventCallback | None = None,
 ) -> ResearchReport:
     """Run bounded Deep Search with typed evaluator-controlled transitions."""
 
@@ -342,6 +344,18 @@ async def run_deep_search(
         if query in completed_query_set:
             state.warnings.append("Deep Search stopped because the follow-up query duplicated a completed query.")
             break
+
+        round_number = state.rounds + 1
+        if event_callback is not None:
+            await event_callback(
+                "subagent_tool_called",
+                {"round_number": round_number},
+            )
+            if round_number > 1:
+                await event_callback(
+                    "follow_up_search",
+                    {"round_number": round_number},
+                )
 
         state.planned_queries.append(query)
         found, warning = await _call_search(

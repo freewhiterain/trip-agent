@@ -82,3 +82,39 @@ Result:
 
 - The verification commands still emit existing dependency warnings from `langgraph` and `jieba/pkg_resources`; no Task 6 failures were observed.
 - The working tree already contained unrelated deleted `.superpowers/sdd` files and modified Task 7 files before Task 6 work started; these were intentionally left untouched.
+
+## Task 6 review fix - 2026-07-26
+
+### Review finding addressed
+
+Added a real-path SSE regression scenario covering provider tool calls, a Deep Search follow-up query, and typed research conflicts. The test runs the actual supervisor, `SubagentRegistry`, `DomainSubagent`, provider adapters, `run_deep_search`, and `tool_result_stream`; only non-target workers use legacy-compatible two-argument fakes.
+
+### Implementation
+
+- Added optional event callbacks to `DomainSubagent` provider calls and `run_deep_search` rounds.
+- Emitted sanitized `subagent_tool_called` metadata for actual provider invocations and `follow_up_search` metadata for rounds after the initial search.
+- Emitted `research_conflict` from the supervisor when the typed subagent research report contains conflicts.
+- Preserved legacy registries, workers, and custom Deep Search runners by passing callbacks only when their call signatures accept the optional keyword.
+- Kept event payloads limited to task ID, worker, tool name, round number, conflict count, and existing public metadata.
+
+### TDD red
+
+```text
+.venv\\Scripts\\python.exe -m pytest tests/test_subagent_events_sse.py::test_real_subagent_tool_follow_up_and_conflict_events_are_emitted -q
+1 failed
+AssertionError: assert 'subagent_tool_call' in []
+```
+
+### Verification
+
+```text
+.venv\\Scripts\\python.exe -m pytest tests/test_subagent_events_sse.py tests/test_phase4_api_and_sse.py -q
+9 passed, 2 warnings
+
+.venv\\Scripts\\python.exe -m pytest tests/test_domain_subagents.py tests/test_deep_search_subgraph.py tests/test_subagent_end_to_end.py tests/test_supervisor_subagent_merge.py -q
+33 passed, 1 warning
+```
+
+### Concerns
+
+- Existing dependency warnings from `langgraph` and `jieba/pkg_resources` remain; no Task 6 failures were observed.

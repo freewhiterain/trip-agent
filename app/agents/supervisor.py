@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import timedelta
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
@@ -203,6 +204,17 @@ def _coerce_subagent_response(result: Any, task: ResearchTask) -> SubagentRespon
         return SubagentResponse.model_validate(result)
     except Exception:
         return _worker_result_to_subagent_response(WorkerResult.model_validate(result))
+
+
+def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+    return keyword in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 def _worker_results_from_state(state: SupervisorState) -> list[WorkerResult]:
@@ -413,11 +425,35 @@ def create_supervisor_graph(
         requirement = TravelRequirement.model_validate(state["requirement"])
         task = ResearchTask.model_validate(state["task"])
         await emit(state, "worker_started", {"task_id": task.id, "worker": task.task_type})
+
+        async def emit_worker_event(event_type: str, payload: dict[str, Any] | None = None):
+            await emit(
+                state,
+                event_type,
+                {
+                    "task_id": task.id,
+                    "worker": task.task_type,
+                    **(payload or {}),
+                },
+            )
+
         is_mock = False
         try:
-            raw_result = await registry.run(task, requirement)
+            if _supports_keyword(registry.run, "event_callback"):
+                raw_result = await registry.run(
+                    task,
+                    requirement,
+                    event_callback=emit_worker_event,
+                )
+            else:
+                raw_result = await registry.run(task, requirement)
             is_mock = isinstance(raw_result, WorkerResult) and raw_result.is_mock
             response = _coerce_subagent_response(raw_result, task)
+            if response.research_report and response.research_report.conflicts:
+                await emit_worker_event(
+                    "research_conflict",
+                    {"conflict_count": len(response.research_report.conflicts)},
+                )
             result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
         except Exception as exc:
             result = WorkerResult(
