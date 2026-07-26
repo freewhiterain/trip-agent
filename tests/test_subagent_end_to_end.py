@@ -130,7 +130,8 @@ async def test_no_llm_or_provider_absence_returns_deterministic_degraded_draft(m
     worker_results = {item.worker: item for item in result.worker_results}
     assert set(worker_results) == WORKERS
     assert result.itinerary
-    assert result.status == "draft"
+    assert result.status == "degraded"
+    assert result.degraded_reason == "worker_unavailable"
     assert result.warnings
     assert all(item.status == "unavailable" for item in worker_results.values())
     assert all(item.warnings for item in worker_results.values())

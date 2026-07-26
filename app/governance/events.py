@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -69,6 +70,7 @@ _PUBLIC_RESEARCH_EVENT_TYPES = {
     "research_conflict": "research_conflict",
     "research_conflict_detected": "research_conflict",
     "conflict_detected": "research_conflict",
+    "subagent_tool_completed": "subagent_tool_completed",
 }
 
 
@@ -100,10 +102,16 @@ def _warning_code(warning: str) -> str:
 def _warning_codes(payload: dict[str, Any]) -> list[str]:
     explicit = payload.get("warning_codes")
     if isinstance(explicit, list):
-        return _dedupe([str(value) for value in explicit])
+        safe_codes: list[str] = []
+        for value in explicit:
+            code = str(value)
+            safe_codes.append(code if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "warning")
+        return _dedupe(safe_codes)
     warnings = payload.get("warnings")
     if isinstance(warnings, list):
-        return _dedupe([_warning_code(str(value)) for value in warnings])
+        return _dedupe(
+            [code for code in (_warning_code(str(value)) for value in warnings) if code != "warning"]
+        )
     return []
 
 
@@ -123,16 +131,33 @@ def _public_research_payload(event_type: str, payload: dict[str, Any]) -> dict[s
         if payload.get(key) is not None:
             public[key] = payload[key]
     tool_name = payload.get("tool_name") or payload.get("tool")
-    if tool_name is not None and event_type in {"subagent_tool_call", "follow_up_search"}:
-        public["tool_name"] = tool_name
+    if tool_name is not None and event_type in {
+        "subagent_tool_call",
+        "follow_up_search",
+        "subagent_tool_completed",
+    }:
+        public["tool_name"] = str(tool_name)
     round_number = payload.get("round_number", payload.get("round"))
-    if round_number is not None and event_type in {"subagent_tool_call", "follow_up_search"}:
+    if (
+        isinstance(round_number, int)
+        and round_number > 0
+        and event_type in {"subagent_tool_call", "follow_up_search", "subagent_tool_completed"}
+    ):
         public["round_number"] = round_number
-    if payload.get("status") is not None and event_type == "subagent_completed":
-        public["status"] = payload["status"]
+    status = payload.get("status")
+    allowed_statuses = {
+        "subagent_completed": {"completed", "partial", "unavailable", "failed"},
+        "subagent_tool_completed": {"sufficient", "partial", "empty", "failed"},
+    }.get(event_type, set())
+    if status in allowed_statuses:
+        public["status"] = status
 
     evidence_count = _count_from_payload(payload, "evidence_count", "count", "evidence")
-    if evidence_count is not None and event_type in {"evidence_collected", "subagent_completed"}:
+    if (
+        isinstance(evidence_count, int)
+        and evidence_count >= 0
+        and event_type in {"evidence_collected", "subagent_completed", "subagent_tool_completed"}
+    ):
         public["evidence_count"] = evidence_count
 
     conflict_count = _count_from_payload(payload, "conflict_count", "conflicts", "count")
@@ -140,7 +165,7 @@ def _public_research_payload(event_type: str, payload: dict[str, Any]) -> dict[s
         public["conflict_count"] = conflict_count
 
     warning_codes = _warning_codes(payload)
-    if warning_codes and event_type == "subagent_completed":
+    if warning_codes and event_type in {"subagent_completed", "subagent_tool_completed"}:
         public["warning_codes"] = warning_codes
     return public
 

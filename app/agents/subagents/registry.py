@@ -52,7 +52,7 @@ class SubagentRegistry:
                 worker=task.task_type,
                 status="failed",
                 summary="No registered domain subagent is available.",
-                warnings=[f"Unregistered subagent worker: {task.task_type}"],
+                warnings=["subagent_error:worker_unregistered"],
             )
         try:
             if event_callback is not None and _supports_keyword(worker.run, "event_callback"):
@@ -64,7 +64,7 @@ class SubagentRegistry:
                 worker=task.task_type,
                 status="failed",
                 summary="Domain subagent execution failed.",
-                warnings=[f"{type(exc).__name__}: {exc}"],
+                warnings=["subagent_error:worker_execution_failed"],
             )
 
 

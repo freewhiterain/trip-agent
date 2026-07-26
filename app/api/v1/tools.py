@@ -180,6 +180,7 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
     planning_task = None
     research_event_task = None
     processing_guard = None
+    planning_completed = False
     try:
         repository = PostgresToolInvocationRepository()
 
@@ -286,15 +287,16 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
 
                 await cancel_and_await_task(research_event_task)
                 research_event_task = None
+                if planning_task in done:
+                    draft = planning_task.result()
+                    planning_completed = True
+                    break
                 if heartbeat_task in done and lease_lost.is_set():
                     await cancel_and_await_task(planning_task)
                     planning_task = None
                     await stop_processing_heartbeat(heartbeat_task)
                     heartbeat_task = None
                     raise ProcessingLeaseLostError("processing lease lost")
-                if planning_task in done:
-                    draft = planning_task.result()
-                    break
             while not research_events.empty():
                 yield research_event_frame(research_events.get_nowait())
         finally:
@@ -304,7 +306,7 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
                 planning_task = None
             await stop_processing_heartbeat(heartbeat_task)
             heartbeat_task = None
-        if lease_lost.is_set():
+        if lease_lost.is_set() and not planning_completed:
             raise ProcessingLeaseLostError("processing lease lost")
         assistant_result = draft.model_dump(mode="json")
         assistant_content = json.dumps(assistant_result, ensure_ascii=False)

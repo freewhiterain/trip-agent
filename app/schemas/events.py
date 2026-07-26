@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from app.schemas.planning import EvidenceSufficiency
+
 
 SSEType = Literal[
     "task",
@@ -25,6 +27,7 @@ SSEType = Literal[
     "subagent_tool_call",
     "follow_up_search",
     "research_conflict",
+    "subagent_tool_completed",
 ]
 
 

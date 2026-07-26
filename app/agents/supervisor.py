@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from app.agents.planner import create_research_plan, parallel_groups
 from app.agents.subagents.registry import create_default_subagent_registry
 from app.config import settings
-from app.governance.evidence import EvidenceGovernanceService
+from app.governance.evidence import EvidenceGovernanceService, ReviewedResearch
 from app.governance.events import TaskEventService
 from app.rag.identifiers import stable_hash
 from app.schemas.planning import (
@@ -68,6 +68,7 @@ class SupervisorState(TypedDict, total=False):
     group_index: int
     task: dict[str, Any]
     worker_results: Annotated[dict[str, dict[str, Any]], merge_worker_results]
+    subagent_responses: Annotated[dict[str, dict[str, Any]], merge_worker_results]
     itinerary: list[dict[str, Any]]
     budget: dict[str, Any]
     draft: dict[str, Any]
@@ -179,6 +180,29 @@ def _subagent_response_to_worker_result(
     )
 
 
+def _reviewed_response_to_worker_result(
+    response: SubagentResponse,
+    *,
+    is_mock: bool = False,
+) -> WorkerResult:
+    reviewed = ReviewedResearch(
+        claims=response.claims,
+        candidates=response.candidates,
+        evidence=response.evidence,
+        warnings=response.warnings,
+    )
+    return WorkerResult(
+        task_id=response.task_id,
+        worker=response.worker,
+        status=response.status,
+        summary=_governed_summary(response, reviewed),
+        options=[_candidate_to_option(candidate, response.worker) for candidate in response.candidates],
+        evidence=response.evidence,
+        warnings=response.warnings,
+        is_mock=is_mock,
+    )
+
+
 def _governed_summary(response: SubagentResponse, reviewed) -> str:
     if response.status == "failed":
         return "Domain subagent execution failed."
@@ -220,6 +244,13 @@ def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
 def _worker_results_from_state(state: SupervisorState) -> list[WorkerResult]:
     values = _worker_result_mapping(state.get("worker_results", {})).values()
     return [WorkerResult.model_validate(value) for value in values]
+
+
+def _subagent_responses_from_state(state: SupervisorState) -> list[SubagentResponse]:
+    response_values = _worker_result_mapping(state.get("subagent_responses", {}))
+    if response_values:
+        return [SubagentResponse.model_validate(value) for value in response_values.values()]
+    return [_worker_result_to_subagent_response(result) for result in _worker_results_from_state(state)]
 
 
 def build_itinerary(
@@ -340,8 +371,8 @@ async def synthesize_itinerary_with_llm(
             return response.days
         app_logger.warning("LLM 综合返回的天数与模板不一致，退回模板行程")
         return template
-    except Exception as exc:
-        app_logger.warning(f"LLM 行程综合失败，退回模板: {type(exc).__name__}: {exc}")
+    except Exception:
+        app_logger.warning("LLM itinerary synthesis failed; using deterministic template: llm_synthesis_failed")
         return template
 
 
@@ -350,9 +381,24 @@ def assemble_draft(
     results: list[WorkerResult],
     itinerary: list[ItineraryDay],
     budget: BudgetSummary,
+    *,
+    governance_warnings: list[str] | None = None,
 ) -> TravelPlanDraft:
-    evidence = [item for result in results for item in result.evidence]
-    warnings = [warning for result in results for warning in result.warnings]
+    evidence_by_id: dict[str, Any] = {}
+    for result in results:
+        for item in result.evidence:
+            key = item.id or f"{item.source}:{item.content}"
+            evidence_by_id.setdefault(key, item)
+    evidence = list(evidence_by_id.values())
+    warnings = [*(governance_warnings or []), *(warning for result in results for warning in result.warnings)]
+    degraded_reason = None
+    runtime_results = [result for result in results if not result.is_mock]
+    if runtime_results and all(result.status in {"unavailable", "failed"} for result in runtime_results):
+        degraded_reason = "worker_unavailable"
+    elif any(result.status in {"partial", "unavailable", "failed"} for result in runtime_results):
+        degraded_reason = "provider_degraded"
+    if degraded_reason is not None:
+        warnings.append(f"planning_degraded:{degraded_reason}")
     return TravelPlanDraft(
         requirement=requirement,
         itinerary=itinerary,
@@ -360,6 +406,8 @@ def assemble_draft(
         worker_results=results,
         evidence=evidence,
         warnings=list(dict.fromkeys(warnings)),
+        status="degraded" if degraded_reason else "draft",
+        degraded_reason=degraded_reason,
     )
 
 
@@ -438,6 +486,7 @@ def create_supervisor_graph(
             )
 
         is_mock = False
+        response: SubagentResponse | None = None
         try:
             if _supports_keyword(registry.run, "event_callback"):
                 raw_result = await registry.run(
@@ -455,29 +504,45 @@ def create_supervisor_graph(
                     {"conflict_count": len(response.research_report.conflicts)},
                 )
             result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
-        except Exception as exc:
+        except Exception:
+            response = None
             result = WorkerResult(
                 task_id=task.id,
                 worker=task.task_type,
                 status="failed",
                 summary="Domain subagent execution failed.",
-                warnings=[f"{type(exc).__name__}: {exc}"],
+                warnings=["subagent_error:supervisor_worker_failed"],
                 is_mock=is_mock,
             )
         await emit(state, "worker_completed", result.model_dump(mode="json"))
         if result.evidence:
             await emit(state, "evidence_collected", {"task_id": task.id, "count": len(result.evidence)})
-        return {"worker_results": {task.id: result.model_dump(mode="json")}}
+        return {
+            "worker_results": {task.id: result.model_dump(mode="json")},
+            "subagent_responses": {task.id: response.model_dump(mode="json")} if response else {},
+        }
 
     async def advance_node(state: SupervisorState) -> dict[str, Any]:
         return {"group_index": state.get("group_index", 0) + 1}
 
     async def route_planner_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
-        results = _worker_results_from_state(state)
+        reviewed = governance.review(_subagent_responses_from_state(state))
+        preliminary = _worker_result_mapping(state.get("worker_results", {}))
+        results = [
+            _reviewed_response_to_worker_result(
+                response,
+                is_mock=bool(preliminary.get(response.task_id, {}).get("is_mock", False)),
+            )
+            for response in reviewed.responses
+        ]
         itinerary = build_itinerary(requirement, results)
         await emit(state, "route_planned", {"days": len(itinerary)})
-        return {"itinerary": [day.model_dump(mode="json") for day in itinerary]}
+        return {
+            "itinerary": [day.model_dump(mode="json") for day in itinerary],
+            "worker_results": {result.task_id: result.model_dump(mode="json") for result in results},
+            "warnings": reviewed.warnings,
+        }
 
     async def budget_node(state: SupervisorState) -> dict[str, Any]:
         requirement = TravelRequirement.model_validate(state["requirement"])
@@ -491,7 +556,13 @@ def create_supervisor_graph(
         template = [ItineraryDay.model_validate(value) for value in state.get("itinerary", [])]
         budget = BudgetSummary.model_validate(state["budget"])
         itinerary = await synthesize_itinerary_with_llm(requirement, results, template)
-        draft = assemble_draft(requirement, results, itinerary, budget)
+        draft = assemble_draft(
+            requirement,
+            results,
+            itinerary,
+            budget,
+            governance_warnings=state.get("warnings", []),
+        )
         await emit(state, "plan_generated", {"days": len(draft.itinerary), "warnings": len(draft.warnings)})
         await emit(state, "task_completed", {"status": "completed"})
         return {

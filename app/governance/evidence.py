@@ -38,6 +38,7 @@ class ReviewedResearch(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     conflicts: list[ResearchConflict] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    responses: list[SubagentResponse] = Field(default_factory=list)
 
 
 class EvidenceGovernanceService:
@@ -54,21 +55,28 @@ class EvidenceGovernanceService:
         ]
         usable_evidence, id_remap = self._review_evidence(responses, warnings)
         usable_ids = {item.id for item in usable_evidence if item.id}
+        evidence_by_id = {item.id: item for item in usable_evidence if item.id}
 
         claims: list[Claim] = []
         seen_claims: set[tuple[str, tuple[str, ...]]] = set()
         candidates: list[EvidenceBoundCandidate] = []
         seen_candidates: set[tuple[str, str, tuple[str, ...]]] = set()
         conflicts: list[ResearchConflict] = []
+        reviewed_responses: list[SubagentResponse] = []
 
         for response in responses:
             warnings.extend(response.warnings)
             claim_sources = list(response.claims)
             candidate_sources = list(response.candidates)
+            report = response.research_report
             if response.research_report is not None:
                 warnings.extend(response.research_report.warnings)
                 claim_sources.extend(response.research_report.claims)
                 conflicts.extend(response.research_report.conflicts)
+
+            response_claims: list[Claim] = []
+            response_candidates: list[EvidenceBoundCandidate] = []
+            response_candidate_keys: set[tuple[str, str, tuple[str, ...]]] = set()
 
             for claim in claim_sources:
                 remapped_ids = self._remap_ids(claim.evidence_ids, id_remap, usable_ids)
@@ -81,7 +89,9 @@ class EvidenceGovernanceService:
                 if key in seen_claims:
                     continue
                 seen_claims.add(key)
-                claims.append(claim.model_copy(update={"evidence_ids": remapped_ids}))
+                governed_claim = claim.model_copy(update={"evidence_ids": remapped_ids})
+                claims.append(governed_claim)
+                response_claims.append(governed_claim)
 
             for candidate in candidate_sources:
                 remapped_ids = self._remap_ids(candidate.evidence_ids, id_remap, usable_ids)
@@ -91,10 +101,52 @@ class EvidenceGovernanceService:
                     )
                     continue
                 key = (candidate.name, candidate.category, tuple(remapped_ids))
-                if key in seen_candidates:
-                    continue
-                seen_candidates.add(key)
-                candidates.append(candidate.model_copy(update={"evidence_ids": remapped_ids}))
+                governed_candidate = candidate.model_copy(update={"evidence_ids": remapped_ids})
+                if key not in seen_candidates:
+                    seen_candidates.add(key)
+                    candidates.append(governed_candidate)
+                if key not in response_candidate_keys:
+                    response_candidate_keys.add(key)
+                    response_candidates.append(governed_candidate)
+
+            response_evidence: list[Evidence] = []
+            seen_response_evidence: set[str] = set()
+            response_evidence_sources = list(response.evidence)
+            if report is not None:
+                response_evidence_sources.extend(report.evidence)
+            for evidence in response_evidence_sources:
+                mapped_id = id_remap.get(evidence.id)
+                if mapped_id in usable_ids and mapped_id not in seen_response_evidence:
+                    response_evidence.append(evidence_by_id[mapped_id])
+                    seen_response_evidence.add(mapped_id)
+
+            governed_report = None
+            if report is not None:
+                report_claims = [claim for claim in response_claims if claim in report.claims]
+                governed_report = report.model_copy(
+                    update={
+                        "claims": report_claims,
+                        "evidence": [item for item in response_evidence if item in report.evidence],
+                    }
+                )
+            reviewed_responses.append(
+                response.model_copy(
+                    update={
+                        "claims": [claim for claim in response_claims if claim in response.claims],
+                        "candidates": response_candidates,
+                        "evidence": [item for item in response_evidence if item in response.evidence],
+                        "research_report": governed_report,
+                    }
+                )
+            )
+
+        metadata_conflicts = self._metadata_conflicts(usable_evidence)
+        existing_conflict_keys = {conflict.fact_key for conflict in conflicts}
+        for conflict in metadata_conflicts:
+            if conflict.fact_key not in existing_conflict_keys:
+                conflicts.append(conflict)
+        if conflicts:
+            warnings.append("evidence_conflict:unresolved")
 
         return ReviewedResearch(
             claims=claims,
@@ -102,6 +154,7 @@ class EvidenceGovernanceService:
             evidence=usable_evidence,
             conflicts=conflicts,
             warnings=list(dict.fromkeys(warnings)),
+            responses=reviewed_responses,
         )
 
     def _review_evidence(
@@ -126,16 +179,36 @@ class EvidenceGovernanceService:
                     warnings.append(f"Dropped evidence without id for task {response.task_id}.")
                     continue
                 key = self._dedupe_key(evidence)
+                valid_from = (
+                    self._as_aware_utc(evidence.valid_from)
+                    if evidence.valid_from is not None
+                    else None
+                )
                 valid_until = (
                     self._as_aware_utc(evidence.valid_until)
                     if evidence.valid_until is not None
                     else None
                 )
-                if valid_until is not None:
-                    evidence = evidence.model_copy(update={"valid_until": valid_until})
+                if valid_from is not None or valid_until is not None:
+                    evidence = evidence.model_copy(
+                        update={
+                            "valid_from": valid_from,
+                            "valid_until": valid_until,
+                        }
+                    )
+                if valid_from is not None and valid_from > now:
+                    id_remap[evidence.id] = None
+                    warnings.append(f"Dropped future evidence {evidence.id} for task {response.task_id}.")
+                    continue
                 if valid_until is not None and valid_until < now:
                     id_remap[evidence.id] = None
                     warnings.append(f"Dropped expired evidence {evidence.id} for task {response.task_id}.")
+                    continue
+                if self._is_external(evidence) and not evidence.source_url:
+                    id_remap[evidence.id] = None
+                    warnings.append(
+                        f"Dropped external evidence without source URL {evidence.id} for task {response.task_id}."
+                    )
                     continue
                 if evidence.id in key_by_evidence_id and key_by_evidence_id[evidence.id] != key:
                     id_remap[evidence.id] = None
@@ -170,6 +243,48 @@ class EvidenceGovernanceService:
             return f"url:{evidence.source_url.strip().lower()}"
         normalized_content = " ".join(evidence.content.split()).lower()
         return f"content:{normalized_content}"
+
+    @staticmethod
+    def _is_external(evidence: Evidence) -> bool:
+        metadata = evidence.metadata
+        source_type = str(metadata.get("source_type", "")).strip().lower()
+        if source_type in {"mock_markdown", "local", "local_rag", "rag", "synthetic"}:
+            return False
+        if metadata.get("is_external") is True:
+            return True
+        if source_type in {"external", "web", "api", "mcp"}:
+            return True
+        if str(metadata.get("provider", "")).strip().lower() in {
+            "amap",
+            "tavily",
+            "web",
+            "mcp",
+        }:
+            return True
+        # A URL is the strongest source-level signal that the item came from outside local RAG.
+        return bool(evidence.source_url)
+
+    @staticmethod
+    def _metadata_conflicts(items: list[Evidence]) -> list[ResearchConflict]:
+        by_key: dict[str, dict[str, list[str]]] = {}
+        for item in items:
+            fact_key = item.metadata.get("fact_key")
+            fact_value = item.metadata.get("fact_value")
+            if fact_key is None or fact_value is None:
+                continue
+            evidence_id = item.id or item.source_url or item.source
+            by_key.setdefault(str(fact_key), {}).setdefault(str(fact_value), []).append(str(evidence_id))
+        return [
+            ResearchConflict(
+                fact_key=fact_key,
+                values=sorted(values),
+                evidence_ids=sorted({evidence_id for group in groups.values() for evidence_id in group}),
+                description=f"Conflicting evidence values for {fact_key}.",
+            )
+            for fact_key, groups in by_key.items()
+            if len(groups) > 1
+            for values in [groups.keys()]
+        ]
 
     @staticmethod
     def _source_rank(evidence: Evidence) -> tuple[int, float]:

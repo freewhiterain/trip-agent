@@ -10,8 +10,13 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agents.subagents.tool_policy import ToolPolicy
-from app.agents.subagents.tools import ProviderError, normalize_tool_result
+from app.agents.subagents.tools import (
+    NormalizedToolResult,
+    ProviderError,
+    normalize_tool_result,
+)
 from app.research.deep_search import DeepSearchRequest, run_deep_search
+from app.schemas.events import EvidenceSufficiency
 from app.schemas.planning import Evidence, ResearchTask, TaskType, TravelRequirement
 from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport, SubagentResponse
 
@@ -92,20 +97,32 @@ class DomainSubagent:
         warnings: list[str] = []
         evidence: list[Evidence] = []
         research_report: ResearchReport | None = None
+        partial_provider_seen = False
+        sufficient_provider_found = False
 
         for provider in self.provider_order:
-            provider_evidence, provider_warnings = await self._invoke_provider(
+            provider_evidence, provider_warnings, sufficiency = await self._invoke_provider(
                 provider,
                 task,
                 requirement,
                 event_callback=event_callback,
             )
             warnings.extend(provider_warnings)
+            if sufficiency.status == "partial":
+                partial_provider_seen = True
+            if sufficiency.status == "sufficient":
+                sufficient_provider_found = True
             if provider_evidence:
-                evidence = provider_evidence
+                existing = {(item.id, item.source_url, item.content) for item in evidence}
+                evidence.extend(
+                    item
+                    for item in provider_evidence
+                    if (item.id, item.source_url, item.content) not in existing
+                )
+            if sufficient_provider_found:
                 break
 
-        if not evidence and self.allow_deep_search:
+        if (not evidence or partial_provider_seen) and not sufficient_provider_found and self.allow_deep_search:
             try:
                 research_report = await self._run_deep_search(
                     task,
@@ -120,9 +137,15 @@ class DomainSubagent:
                 )
             if research_report is not None:
                 warnings.extend(research_report.warnings)
-                evidence = self._normalize_evidence(
+                deep_evidence = self._normalize_evidence(
                     research_report.evidence,
                     "deep_research",
+                )
+                existing = {(item.id, item.source_url, item.content) for item in evidence}
+                evidence.extend(
+                    item
+                    for item in deep_evidence
+                    if (item.id, item.source_url, item.content) not in existing
                 )
 
         if not evidence:
@@ -141,6 +164,8 @@ class DomainSubagent:
         warnings.extend(grounded.warnings)
 
         status = "completed" if grounded.candidates or grounded.claims else "partial"
+        if partial_provider_seen and research_report is None:
+            status = "partial"
         if research_report is not None and research_report.status in {"partial", "unavailable", "failed"}:
             status = "partial" if evidence else "unavailable"
 
@@ -319,10 +344,14 @@ class DomainSubagent:
         requirement: TravelRequirement,
         *,
         event_callback: EventCallback | None = None,
-    ) -> tuple[list[Evidence], list[str]]:
+    ) -> tuple[list[Evidence], list[str], Any]:
         tool = await self._tool_for(provider)
         if tool is None:
-            return [], [f"{provider} is unavailable for {self.worker}."]
+            return [], [f"{provider} is unavailable for {self.worker}."], EvidenceSufficiency(
+                status="failed",
+                evidence_count=0,
+                reason_code="provider_unavailable",
+            )
 
         payload = self._provider_payload(provider, task, requirement)
         try:
@@ -342,7 +371,20 @@ class DomainSubagent:
         evidence = [item for item in normalized if isinstance(item, Evidence)]
         errors = [item for item in normalized if isinstance(item, ProviderError)]
         warnings = [f"{error.provider}: {error.code}" for error in errors]
-        return self._normalize_evidence(evidence, provider), warnings
+        if event_callback is not None:
+            completion_payload = {
+                "tool_name": getattr(tool, "name", None) or provider,
+                "round_number": 1,
+                "status": normalized.sufficiency.status,
+                "evidence_count": normalized.sufficiency.evidence_count,
+            }
+            if normalized.sufficiency.status == "failed":
+                completion_payload["warning_codes"] = ["provider_unavailable"]
+            await event_callback(
+                "subagent_tool_completed",
+                completion_payload,
+            )
+        return self._normalize_evidence(evidence, provider), warnings, normalized.sufficiency
 
     async def _run_deep_search(
         self,
@@ -457,11 +499,13 @@ class DomainSubagent:
         self,
         provider: str,
         raw_result: Any,
-    ) -> list[Evidence | ProviderError]:
+    ) -> NormalizedToolResult:
+        if isinstance(raw_result, NormalizedToolResult):
+            return raw_result
         if isinstance(raw_result, list) and all(
             isinstance(item, (Evidence, ProviderError)) for item in raw_result
         ):
-            return raw_result
+            return normalize_tool_result(provider, raw_result)
         return normalize_tool_result(provider, raw_result)
 
     @staticmethod

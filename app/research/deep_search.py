@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -131,6 +132,8 @@ def _dedupe_and_filter(
     existing: list[Evidence],
     incoming: list[Evidence],
     *,
+    query: str,
+    round_number: int,
     require_fresh: bool,
     now: datetime,
 ) -> tuple[list[Evidence], list[str]]:
@@ -148,6 +151,11 @@ def _dedupe_and_filter(
         if key in seen:
             duplicate_count += 1
             continue
+        if not item.id:
+            seed = f"{query.strip()}\n{item.content.strip()}\n{round_number}"
+            item = item.model_copy(
+                update={"id": f"deep-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"}
+            )
         evidence.append(item)
         seen.add(key)
 
@@ -368,12 +376,23 @@ async def run_deep_search(
         state.rounds += 1
         state.completed_queries.append(query)
         completed_query_set.add(query)
+        if event_callback is not None:
+            await event_callback(
+                "subagent_tool_completed",
+                {
+                    "round_number": round_number,
+                    "status": "sufficient" if found else "failed" if warning else "empty",
+                    "evidence_count": len(found),
+                },
+            )
         if warning:
             state.warnings.append(warning)
 
         state.evidence, normalize_warnings = _dedupe_and_filter(
             state.evidence,
             found,
+            query=query,
+            round_number=round_number,
             require_fresh=request.require_fresh,
             now=now,
         )

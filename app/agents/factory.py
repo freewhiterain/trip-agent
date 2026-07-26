@@ -63,11 +63,13 @@ async def run_travel_planning(requirement, **kwargs):
     if fallback_reason is None:
         return draft
 
-    warnings = list(dict.fromkeys([*draft.warnings, DEGRADED_PLANNING_MARKER]))
+    reason = draft.degraded_reason or fallback_reason
+    marker = DEGRADED_PLANNING_MARKER if reason == DEGRADED_PLANNING_REASON else f"planning_degraded:{reason}"
+    warnings = list(dict.fromkeys([*draft.warnings, marker]))
     return draft.model_copy(
         update={
             "status": "degraded",
-            "degraded_reason": fallback_reason,
+            "degraded_reason": reason,
             "warnings": warnings,
         }
     )

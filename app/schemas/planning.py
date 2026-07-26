@@ -14,6 +14,14 @@ WorkerStatus = Literal["completed", "partial", "unavailable", "failed"]
 PlanningStatus = Literal["draft", "degraded"]
 
 
+class EvidenceSufficiency(BaseModel):
+    """Typed outcome metadata for a normalized provider response."""
+
+    status: Literal["sufficient", "partial", "empty", "failed"]
+    evidence_count: int = Field(default=0, ge=0)
+    reason_code: str = Field(min_length=1)
+
+
 class TravelRequirement(BaseModel):
     """一次国内旅行规划所需的最小结构化需求。"""
 
@@ -153,4 +161,4 @@ class TravelPlanDraft(BaseModel):
     evidence: list[Evidence]
     warnings: list[str] = Field(default_factory=list)
     status: PlanningStatus = "draft"
-    degraded_reason: Literal["no_llm_or_provider"] | None = None
+    degraded_reason: Literal["no_llm_or_provider", "worker_unavailable", "provider_degraded"] | None = None
