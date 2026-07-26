@@ -25,11 +25,16 @@ def requirement() -> TravelRequirement:
     )
 
 
-def task(worker: str, query: str | None = None) -> ResearchTask:
+def task(
+    worker: str,
+    query: str | None = None,
+    research_mode: str = "normal",
+) -> ResearchTask:
     return ResearchTask(
         id=f"{worker}-task",
         task_type=worker,
         query=query or f"Find {worker} options in Chengdu",
+        research_mode=research_mode,
     )
 
 
@@ -167,6 +172,29 @@ async def test_food_subagent_uses_bounded_deep_search_only_after_rag_and_search_
     assert [call[0].worker for call in deep_search.calls] == ["food"]
     assert result.research_report == deep_report
     assert result.candidates[0].evidence_ids == ["ev-deep"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_deep_research_runs_even_when_rag_is_sufficient():
+    deep_report = ResearchReport(
+        status="completed",
+        summary="Deep Search found current food evidence.",
+        evidence=[Evidence(id="ev-deep-explicit", content="Current food listing.", source="web")],
+    )
+    deep_search = RecordingDeepSearch(deep_report)
+    agent = FoodSubagent(
+        rag=FakeProvider(
+            "local_rag",
+            [Evidence(id="ev-rag", content="Local food guide listing.", source="local_rag")],
+        ),
+        search=FakeProvider("search_mcp", []),
+        deep_search=deep_search,
+    )
+
+    result = await agent.run(task("food", research_mode="deep"), requirement())
+
+    assert len(deep_search.calls) == 1
+    assert result.research_report == deep_report
 
 
 def test_subagent_drops_content_not_supported_by_referenced_evidence():

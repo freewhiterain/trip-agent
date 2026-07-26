@@ -122,7 +122,14 @@ class DomainSubagent:
             if sufficient_provider_found:
                 break
 
-        if (not evidence or partial_provider_seen) and not sufficient_provider_found and self.allow_deep_search:
+        explicit_deep_search = task.research_mode == "deep"
+        if explicit_deep_search and not self.allow_deep_search:
+            warnings.append(f"Deep Search is not allowed for worker {self.worker}.")
+        should_run_deep_search = explicit_deep_search or (
+            (not evidence or partial_provider_seen)
+            and not sufficient_provider_found
+        )
+        if should_run_deep_search and self.allow_deep_search:
             try:
                 research_report = await self._run_deep_search(
                     task,

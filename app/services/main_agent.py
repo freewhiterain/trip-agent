@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from app.config import settings
-from app.schemas.tools import MainAgentDecision
+from app.schemas.tools import AgentToolArguments, AgentToolCall, MainAgentDecision
 from app.services.planning import KNOWN_DESTINATIONS, RequirementExtractor
 
 
@@ -24,6 +24,22 @@ _OPEN_QUESTION_MARKERS = (
     "介绍一下",
     "了解一下",
 )
+_AGENT_TOOL_MARKERS = (
+    "\u6df1\u5165\u7814\u7a76",
+    "\u4ed4\u7ec6\u7814\u7a76",
+    "\u8be6\u7ec6\u7814\u7a76",
+    "\u67e5\u4e00\u4e0b",
+    "\u67e5\u67e5",
+    "\u8054\u7f51\u67e5",
+    "\u6700\u65b0",
+)
+_DEEP_RESEARCH_MARKERS = ("\u6df1\u5165\u7814\u7a76", "\u4ed4\u7ec6\u7814\u7a76", "\u8be6\u7ec6\u7814\u7a76")
+_AGENT_TOOL_WORKER_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("weather", ("\u5929\u6c14", "\u6c14\u6e29", "\u964d\u96e8", "\u4e0b\u96e8", "\u6c14\u5019")),
+    ("transport", ("\u4ea4\u901a", "\u600e\u4e48\u53bb", "\u9ad8\u94c1", "\u98de\u673a", "\u673a\u7968", "\u5730\u94c1")),
+    ("hotel", ("\u4f4f\u5bbf", "\u9152\u5e97", "\u6c11\u5bbf", "\u4f4f\u54ea", "\u5ba2\u6808")),
+    ("food", ("\u7f8e\u98df", "\u5403", "\u9910\u5385", "\u5c0f\u5403", "\u83dc")),
+)
 _PROACTIVE_OFFER = "需要我帮你规划一下旅行吗"
 
 
@@ -40,6 +56,13 @@ class MainAgentService:
                 action="collect_trip_requirements",
                 reason="用户明确请求规划",
                 initial_values=await self._prefill(text),
+            )
+        agent_tool_call = self._build_agent_tool_call(text, normalized)
+        if agent_tool_call is not None:
+            return MainAgentDecision(
+                action="invoke_agent_tool",
+                reason="\u7528\u6237\u8bf7\u6c42\u5bf9\u7279\u5b9a\u9886\u57df\u8fdb\u884c\u6df1\u5165\u7814\u7a76",
+                tool_call=agent_tool_call,
             )
         if self._is_destination_recommendation(normalized):
             return MainAgentDecision(action="recommend_destination", reason="用户请求目的地推荐")
@@ -74,6 +97,36 @@ class MainAgentService:
             return True
         return MainAgentService._mentions_known_destination(text) and any(
             marker in text for marker in ("推荐", "亲子", "景点", "地方", "好玩", "玩")
+        )
+
+    @staticmethod
+    def _build_agent_tool_call(message: str, normalized: str) -> AgentToolCall | None:
+        if not any(marker in normalized for marker in _AGENT_TOOL_MARKERS):
+            return None
+        destination = next(
+            (candidate for candidate in KNOWN_DESTINATIONS if candidate in normalized),
+            None,
+        )
+        if destination is None:
+            return None
+
+        worker = next(
+            (
+                candidate
+                for candidate, markers in _AGENT_TOOL_WORKER_MARKERS
+                if any(marker in normalized for marker in markers)
+            ),
+            "attractions",
+        )
+        return AgentToolCall(
+            name=f"research_{worker}",
+            arguments=AgentToolArguments(
+                destination=destination,
+                query=message,
+                research_mode=(
+                    "deep" if any(marker in normalized for marker in _DEEP_RESEARCH_MARKERS) else "normal"
+                ),
+            ),
         )
 
     @staticmethod
@@ -135,6 +188,12 @@ class MainAgentService:
             )
         except Exception:
             return MainAgentDecision(action="direct_response", reason="路由模型不可用，保守地直接回复")
+
+        if decision.action == "invoke_agent_tool" and decision.tool_call is None:
+            return MainAgentDecision(
+                action="direct_response",
+                reason="路由模型未提供有效的工具调用参数",
+            )
 
         if decision.action != "collect_trip_requirements":
             return decision.model_copy(update={"initial_values": {}})

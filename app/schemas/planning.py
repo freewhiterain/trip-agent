@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 TaskType = Literal["attractions", "transport", "hotel", "food", "weather"]
+ResearchMode = Literal["normal", "deep"]
 WorkerStatus = Literal["completed", "partial", "unavailable", "failed"]
 PlanningStatus = Literal["draft", "degraded"]
 
@@ -87,6 +88,7 @@ class ResearchTask(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
     task_type: TaskType
     query: str
+    research_mode: ResearchMode = "normal"
     dependencies: list[str] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
     completion_criteria: list[str] = Field(default_factory=list)

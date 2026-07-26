@@ -288,7 +288,19 @@ class EvidenceGovernanceService:
 
     @staticmethod
     def _source_rank(evidence: Evidence) -> tuple[int, float]:
-        return (SOURCE_RANKS.get(evidence.source.lower(), 99), -evidence.confidence)
+        metadata = evidence.metadata
+        candidates = [
+            str(metadata.get("provider", "")).strip().lower(),
+            str(metadata.get("source_type", "")).strip().lower(),
+            evidence.source.strip().lower(),
+        ]
+        for candidate in candidates:
+            if candidate in SOURCE_RANKS:
+                return (SOURCE_RANKS[candidate], -evidence.confidence)
+            for source_name, rank in SOURCE_RANKS.items():
+                if source_name in candidate:
+                    return (rank, -evidence.confidence)
+        return (99, -evidence.confidence)
 
     @staticmethod
     def _as_aware_utc(value: datetime) -> datetime:

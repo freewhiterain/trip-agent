@@ -172,3 +172,26 @@ def test_governance_preserves_conflicts_and_warnings_without_resolving_them():
 
     assert reviewed.conflicts == [conflict]
     assert "source disagreement needs human review" in reviewed.warnings
+
+
+def test_governance_ranks_real_provider_names_when_deduplicating_sources():
+    official = Evidence(
+        id="official-hours",
+        content="Museum is open.",
+        source="official tourism site",
+        source_url="https://example.test/museum-hours",
+        metadata={"provider": "official"},
+        confidence=0.7,
+    )
+    tavily = Evidence(
+        id="tavily-hours",
+        content="Museum is open.",
+        source="Tavily search result",
+        source_url="https://example.test/museum-hours",
+        metadata={"provider": "tavily"},
+        confidence=0.99,
+    )
+
+    reviewed = EvidenceGovernanceService().review([_response(evidence=[tavily, official])])
+
+    assert [item.id for item in reviewed.evidence] == ["official-hours"]

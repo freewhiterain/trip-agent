@@ -47,7 +47,11 @@ class AgentToolRegistry:
             )
 
         arguments = call.arguments
-        task = ResearchTask(task_type=worker, query=arguments.query)
+        task = ResearchTask(
+            task_type=worker,
+            query=arguments.query,
+            research_mode=arguments.research_mode,
+        )
         requirement = TravelRequirement(
             destination=arguments.destination,
             departure_date=arguments.departure_date or date.today(),
