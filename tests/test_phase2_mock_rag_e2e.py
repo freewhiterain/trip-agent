@@ -100,10 +100,11 @@ async def test_confirmed_form_runs_supervisor_once_across_five_category_scoped_w
 
     calls = []
     real_run_travel_planning = tools.run_travel_planning
+    registry = build_local_registry(LocalKnowledgeService())
 
     async def counting_run_travel_planning(requirement, **kwargs):
         calls.append(requirement)
-        return await real_run_travel_planning(requirement, **kwargs)
+        return await real_run_travel_planning(requirement, registry=registry, **kwargs)
 
     monkeypatch.setattr(tools, "run_travel_planning", counting_run_travel_planning, raising=False)
 
@@ -122,11 +123,13 @@ async def test_confirmed_form_runs_supervisor_once_across_five_category_scoped_w
 
     # Supervisor runs exactly once even though the confirmed form was submitted twice.
     assert len(calls) == 1
-    assert [event["type"] for event in stream] == ["result", "token", "done"]
+    assert [event["type"] for event in stream][-3:] == ["result", "token", "done"]
+    assert "subagent_started" in [event["type"] for event in stream]
     assert [event["type"] for event in duplicate_stream] == ["result", "token", "done"]
-    assert duplicate_stream[0]["payload"]["result"] == stream[0]["payload"]["result"]
+    result_event = next(event for event in stream if event["type"] == "result")
+    assert duplicate_stream[0]["payload"]["result"] == result_event["payload"]["result"]
 
-    draft = stream[0]["payload"]["result"]
+    draft = result_event["payload"]["result"]
     worker_results = {result["worker"]: result for result in draft["worker_results"]}
 
     # All five category Workers ran and are clearly marked as local mock results.
