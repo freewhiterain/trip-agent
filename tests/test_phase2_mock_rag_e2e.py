@@ -96,7 +96,14 @@ async def test_confirmed_form_runs_supervisor_once_across_five_category_scoped_w
     user = SimpleNamespace(id=uuid4())
     repository = InMemoryInvocationRepository([invocation(user_id=str(user.id))])
     configure_endpoint(monkeypatch, repository)
+    from app.agents import factory
     from app.api.v1 import tools
+
+    # 这条用例断言的是本地 mock RAG 链路（transport 无出发地时 partial、
+    # 全部证据 source_type=mock_markdown），只有 legacy WorkerRegistry 会这样。
+    # TRAVEL_AGENT_MODE 的默认值后来改成了 supervisor_subagents，用例没有钉住
+    # 模式，于是开始沉默地跑另一条注册表。按仓库既有约定显式钉住模式。
+    monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor")
 
     calls = []
     real_run_travel_planning = tools.run_travel_planning

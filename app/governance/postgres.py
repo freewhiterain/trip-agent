@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from app.models.base import async_session_maker
 from app.models.governance import Approval, SavedItinerary, TaskEvent, TripHistory, UserPreference
@@ -34,12 +34,43 @@ class PostgresApprovalRepository:
             entity = await session.get(Approval, UUID(approval_id))
             if entity is None:
                 return None
-            return ApprovalRecord(
-                id=str(entity.id), task_id=entity.task_id, user_id=str(entity.user_id),
-                action=entity.action, payload=entity.payload, status=entity.status,
-                decision_payload=entity.decision_payload, created_at=entity.created_at,
-                decided_at=entity.decided_at,
+            return self._record_from_entity(entity)
+
+    async def settle_once(
+        self,
+        approval_id: str,
+        user_id: str,
+        status: str,
+        decision_payload: dict | None,
+        decided_at: datetime,
+    ) -> ApprovalRecord | None:
+        """只在记录仍为 pending 时原子地写入终态，否则返回 None。
+
+        把状态判定放进 UPDATE 的 WHERE 里，让数据库来决定谁是赢家；
+        用 save() 走"读出来改完再写回"会留下并发覆盖窗口。
+        """
+        async with self.session_factory() as session, session.begin():
+            result = await session.execute(
+                update(Approval)
+                .where(
+                    Approval.id == UUID(approval_id),
+                    Approval.user_id == UUID(user_id),
+                    Approval.status == "pending",
+                )
+                .values(status=status, decision_payload=decision_payload, decided_at=decided_at)
+                .returning(Approval)
             )
+            entity = result.scalar_one_or_none()
+            return self._record_from_entity(entity) if entity else None
+
+    @staticmethod
+    def _record_from_entity(entity: Approval) -> ApprovalRecord:
+        return ApprovalRecord(
+            id=str(entity.id), task_id=entity.task_id, user_id=str(entity.user_id),
+            action=entity.action, payload=entity.payload, status=entity.status,
+            decision_payload=entity.decision_payload, created_at=entity.created_at,
+            decided_at=entity.decided_at,
+        )
 
 
 class PostgresEventRepository:

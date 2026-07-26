@@ -24,6 +24,7 @@ from app.agents.subagents.registry import create_default_subagent_registry
 from app.config import settings
 from app.governance.evidence import EvidenceGovernanceService, ReviewedResearch
 from app.governance.events import TaskEventService
+from app.rag.evidence import evidence_is_mock
 from app.rag.identifiers import stable_hash
 from app.schemas.planning import (
     BudgetSummary,
@@ -497,8 +498,11 @@ def create_supervisor_graph(
                 )
             else:
                 raw_result = await registry.run(task, requirement)
+            # 兼容旧 WorkerResult 的显式标记，同时按证据来源兜底：subagent 返回的
+            # 是 SubagentResponse，只看 isinstance 会让本地模拟资料丢失 mock 披露。
             is_mock = isinstance(raw_result, WorkerResult) and raw_result.is_mock
             response = _coerce_subagent_response(raw_result, task)
+            is_mock = is_mock or evidence_is_mock(response.evidence)
             if response.research_report and response.research_report.conflicts:
                 await emit_worker_event(
                     "research_conflict",
@@ -533,7 +537,10 @@ def create_supervisor_graph(
         results = [
             _reviewed_response_to_worker_result(
                 response,
-                is_mock=bool(preliminary.get(response.task_id, {}).get("is_mock", False)),
+                # 治理复核后重建结果时同样要按证据兜底，否则 worker 节点推导出的
+                # mock 标记会在这一步被 preliminary 里的缺省值悄悄抹掉。
+                is_mock=bool(preliminary.get(response.task_id, {}).get("is_mock", False))
+                or evidence_is_mock(response.evidence),
             )
             for response in reviewed.responses
         ]

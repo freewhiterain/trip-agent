@@ -61,6 +61,25 @@ def evidence_from_document(
     )
 
 
+# 本地模拟语料的 source_type 标记。真实数据源接入后这些证据自然消失，
+# is_mock 也就自动变成 False，不需要再回来改判定代码。
+MOCK_SOURCE_TYPES = frozenset({"mock_markdown"})
+
+
+def evidence_is_mock(items: list[Evidence]) -> bool:
+    """判断一批证据是否由本地模拟语料支撑。
+
+    这是 is_mock 的唯一判定口径。此前有两套各自失真的推导：本地 Worker
+    无条件写死 True，而 Supervisor 按"结果对象是不是 WorkerResult"来判断。
+    前者让 assemble_draft 的降级统计恒为空集（planning_degraded 永不触发），
+    后者让 subagent 路径上的模拟资料彻底丢失披露标记。
+    """
+    return any(
+        str(item.metadata.get("source_type", "")).strip() in MOCK_SOURCE_TYPES
+        for item in items
+    )
+
+
 def is_evidence_fresh(evidence: Evidence, now: datetime | None = None) -> bool:
     now = now or datetime.now(timezone.utc)
     if evidence.valid_from and now < evidence.valid_from:

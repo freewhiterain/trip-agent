@@ -10,7 +10,7 @@ from app.agents.factory import create_planning_registry
 from app.config import settings
 from app.governance.drafts import PostgresDraftRepository
 from app.utils.logger import app_logger
-from app.api.v1 import conversations, chat, planning, tools, users
+from app.api.v1 import conversations, chat, health, planning, tools, users
 
 
 @asynccontextmanager
@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
     app_logger.info(f"FastAPI 使用的事件循环: {type(loop).__name__}")
 
     from app.core.checkpointer import checkpointer_lifespan
+    from app.governance.startup_recovery import recover_orphaned_tool_invocations
     from app.mcp_core.client import MCPClientManager
     from app.core.store import store_lifespan
 
@@ -34,6 +35,9 @@ async def lifespan(app: FastAPI):
 
         async with store_lifespan():
             app_logger.info("Store 已就绪")
+
+            # 上一次进程若被强杀，认领会滞留在 processing，这里自动归还。
+            await recover_orphaned_tool_invocations()
 
             # 初始化 MCP（如果配置了的话）
             mcp = await MCPClientManager.get_instance()
@@ -52,6 +56,14 @@ async def lifespan(app: FastAPI):
                 app_logger.info("MCP 服务已关闭")
             except Exception as e:
                 app_logger.warning(f"MCP 关闭异常: {e}")
+
+            # 归还共享的 LLM httpx 连接池。
+            try:
+                from app.agents.llm import aclose_http_clients
+
+                await aclose_http_clients()
+            except Exception as e:
+                app_logger.warning(f"LLM HTTP 客户端关闭异常: {e}")
 
     app_logger.info("应用已关闭")
 
@@ -79,6 +91,7 @@ app.add_middleware(
 )
 
 # 注册 API 路由
+app.include_router(health.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(conversations.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")

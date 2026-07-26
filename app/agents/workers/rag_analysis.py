@@ -41,6 +41,9 @@ def worker_result_from_analysis(
         options=analysis.options,
         evidence=evidence,
         warnings=analysis.warnings,
+        # 本地 Markdown 路径的结果必须一律披露为模拟数据（见 NEW_CHAT_HANDOFF
+        # 的数据契约）。is_mock 只表示"数据来源是本地模拟资料"，不表示健康度；
+        # 降级判定由 assemble_draft 按证据与状态另行计算。
         is_mock=True,
     )
 
