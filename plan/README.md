@@ -72,6 +72,29 @@ collision with an unrelated earlier Task 5's report (task-brief/report files are
 by task number only, not per-plan)"*——正是第 2 条里主仓丢失 `task-1..6` 的成因。
 本目录按规划分文件夹，就不会再有这个问题。
 
+## codex worktree 的代码侧核验
+
+归档同时核验了三个 codex worktree（`~/.codex/worktrees/{daa3,ed71,05ea}/Trip`）能否
+安全删除。它们是本仓的注册 worktree，detached HEAD @ `946f8c4`，分别有
+83 / 59 / 48 项**未提交改动**——文档已归档不代表代码没东西。
+
+1. `946f8c4` 已完全包含在 main 中（main 领先 69 个提交，worktree 独有 **0** 个提交）。
+2. `daa3` 的未提交改动逐文件比对，内容全部命中 main 历史提交
+   （`6387d30` 意图路由重构、`74e7cdf` Phase 2 Mock RAG），仅 `.gitignore` 例外。
+3. `ed71` / `05ea` 有若干行在 main 历史中查无——逐行比对会高估（main 后来 69 个
+   提交大幅重构，行被重写不等于功能丢失），实际查看内容后确认是旧 coordinator/slot
+   版聊天实现（`coordinator.plan_full` / `refresh_slice` / `rewrite` /
+   `answer_open_question` / `legacy_payload()`），正是意图路由那轮 Task 9
+   "Remove Obsolete Slot And Coordinator Chat Logic" **有意删除**的死代码。
+
+结论：三者均可删除，无内容丢失。删除应走 `git worktree remove --force <路径>`
+再 `git worktree prune`——它们在 `.git/worktrees/` 下有管理文件，直接删文件夹会留下
+悬空记录。
+
+> 删除前曾导出三份 `git apply` 可还原的未提交状态快照（1.7 MB）。核验完成后确认
+> 其中 59% 是本目录已收录的 sdd 文档、6% 是已收录的 plans/specs，其余代码亦已验明
+> 无独有内容，故删除快照。真需还原时直接取 main 历史中的 `6387d30` / `74e7cdf` 即可。
+
 ## 后续新增规划
 
 新起一次规划就建 `NN-意图/`，编号接着往下排。原先 `docs/superpowers/{plans,specs}/`
