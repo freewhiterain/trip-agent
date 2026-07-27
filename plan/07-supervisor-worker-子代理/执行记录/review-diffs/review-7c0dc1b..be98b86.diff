@@ -1,0 +1,603 @@
+﻿# Review package: 7c0dc1b..be98b86
+
+## Commits
+be98b86 fix: address task 5 evidence governance review
+
+## Files changed
+ .../task-5-report.md                               | 118 +++++++++++++++++++++
+ app/agents/planner.py                              |   6 +-
+ app/agents/supervisor.py                           |  25 ++++-
+ app/governance/evidence.py                         |  25 ++++-
+ tests/test_evidence_governance.py                  |  66 ++++++++++++
+ tests/test_phase1_planning_contracts.py            |   5 +
+ tests/test_supervisor_subagent_merge.py            |  61 ++++++++++-
+ 7 files changed, 290 insertions(+), 16 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-5-report.md b/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-5-report.md
+new file mode 100644
+index 0000000..52f38fd
+--- /dev/null
++++ b/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-5-report.md
+@@ -0,0 +1,118 @@
++# Task 5 Report: Evidence Governance and Supervisor Result Merging
++
++## Status
++
++Implemented Task 5 in the main checkout.
++
++## Scope
++
++Created:
++
++- `app/governance/evidence.py`
++- `tests/test_evidence_governance.py`
++- `tests/test_supervisor_subagent_merge.py`
++
++Modified:
++
++- `app/agents/planner.py`
++- `app/agents/supervisor.py`
++- `tests/test_phase1_planning_contracts.py`
++
++## Behavior Implemented
++
++- Added `EvidenceGovernanceService.review(results) -> ReviewedResearch`.
++- Validates that claims and candidates only survive when bound to usable evidence IDs.
++- Drops evidence without IDs in governed `SubagentResponse` payloads.
++- Deduplicates evidence by `source_url` first and normalized content second.
++- Uses deterministic source ranking to choose the preferred duplicate without inventing conflict resolution.
++- Rejects evidence whose `valid_until` has expired.
++- Preserves unresolved `ResearchConflict` objects and warning messages.
++- Added `merge_worker_results(current, incoming)` as a deterministic Supervisor reducer keyed by `task_id`.
++- Changed confirmed-destination planning to produce five independent domain tasks in a single parallel group.
++- Integrated the Supervisor with `SubagentRegistry` by default.
++- Converts each subagent response through evidence governance before creating the downstream `WorkerResult`.
++- Converts subagent/worker exceptions into standard failed task results so sibling branches continue.
++- Preserves legacy `WorkerRegistry` compatibility by normalizing legacy ID-less evidence into deterministic IDs during conversion and preserving `is_mock`.
++
++## TDD Notes
++
++Initial focused Task 5 red run failed for the expected missing interfaces:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_evidence_governance.py tests/test_supervisor_subagent_merge.py -q
++ModuleNotFoundError: No module named 'app.governance.evidence'
++ImportError: cannot import name 'merge_worker_results' from 'app.agents.supervisor'
++```
++
++After implementation, focused Task 5 tests passed.
++
++## Verification
++
++Focused Task 5 tests:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_evidence_governance.py tests/test_supervisor_subagent_merge.py -q
++7 passed, 1 warning in 6.09s
++```
++
++Required Task 5 supervisor/planning set:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_evidence_governance.py tests/test_supervisor_subagent_merge.py tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py -q
++15 passed, 2 warnings in 21.25s
++```
++
++Relevant subagent contract/domain tests:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_domain_subagents.py tests/test_subagent_contracts.py -q
++12 passed in 0.22s
++```
++
++Legacy WorkerRegistry compatibility spot check after supervisor normalization:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_phase2_mock_rag_e2e.py::test_missing_category_fixture_and_llm_failure_degrade_without_losing_other_workers tests/test_phase2_mock_rag_e2e.py::test_single_worker_exception_does_not_block_other_worker_results -q
++2 passed, 2 warnings in 82.22s
++```
++
++Syntax/import check:
++
++```text
++.venv\Scripts\python.exe -m compileall -q app\governance app\agents
++exit 0
++```
++
++## Concerns
++
++- The worktree had pre-existing unrelated `.superpowers/sdd` deletions/modifications, including Task 7 files, before Task 5 began. They were not modified or staged for this task.
++- The phase-2 compatibility spot check is slow in this environment because the legacy retrieval path attempts unavailable dense/vector/graph dependencies and degrades after connection failures.
++
++## Fix implementation follow-up
++
++Addressed all Task 5 review findings with focused TDD regressions:
++
++- Added red tests for duplicate evidence ID remapping across repeated ranking changes, naive `valid_until` expiry comparisons, governed-only worker summaries, governance/conversion failure isolation, and the planner docstring contract.
++- Updated evidence governance so every duplicate ID for a source/content key remaps to the final preferred evidence, and naive/aware `valid_until` values are normalized to UTC before filtering.
++- Moved subagent coercion and governance conversion inside the Supervisor worker failure isolation path so malformed-but-schema-adjacent payloads become failed `WorkerResult`s without blocking sibling branches.
++- Replaced raw subagent summary propagation with summaries derived from governed claims/candidates/evidence metadata, preserving only standard failure summaries for failed workers.
++- Updated the planner docstring to describe the current single parallel group of five independent tasks.
++
++Red verification:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_evidence_governance.py tests/test_supervisor_subagent_merge.py tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py -q
++5 failed, 15 passed, 2 warnings
++```
++
++Green verification:
++
++```text
++.venv\Scripts\python.exe -m pytest tests/test_evidence_governance.py tests/test_supervisor_subagent_merge.py tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py -q
++20 passed, 2 warnings
++```
++
++Concerns:
++
++- Pre-existing unrelated `.superpowers/sdd` deletions/modifications were present before this fix work and were not touched or staged.
++- Test warnings are dependency deprecation warnings from `langgraph`/`jieba`, not Task 5 failures.
+diff --git a/app/agents/planner.py b/app/agents/planner.py
+index d75d205..184f9db 100644
+--- a/app/agents/planner.py
++++ b/app/agents/planner.py
+@@ -1,21 +1,17 @@
+ """确定性的旅行研究 Planner。"""
+ 
+ from app.schemas.planning import ResearchTask, TravelRequirement
+ 
+ 
+ def create_research_plan(requirement: TravelRequirement) -> list[ResearchTask]:
+-    """生成带依赖关系的研究任务 DAG。
+-
+-    第一组（并行）：目的地、天气——互不依赖；
+-    第二组（并行）：交通、住宿、美食——依赖目的地研究结论。
+-    """
++    """Generate one single parallel group of five independent research tasks."""
+     destination = requirement.destination
+     common_criteria = ["返回结构化候选项", "事实结论附带 Evidence", "缺失实时数据时明确降级"]
+ 
+     attractions_task = ResearchTask(
+         task_type="attractions",
+         query=f"研究{destination}的景点、文化和适合的游览区域",
+         required_tools=["hybrid_rag", "search"],
+         completion_criteria=common_criteria,
+     )
+     weather_task = ResearchTask(
+diff --git a/app/agents/supervisor.py b/app/agents/supervisor.py
+index 5823997..6d46164 100644
+--- a/app/agents/supervisor.py
++++ b/app/agents/supervisor.py
+@@ -158,35 +158,49 @@ def _worker_result_to_subagent_response(result: WorkerResult) -> SubagentRespons
+     )
+ 
+ 
+ def _subagent_response_to_worker_result(
+     response: SubagentResponse,
+     governance: EvidenceGovernanceService | None = None,
+     *,
+     is_mock: bool = False,
+ ) -> WorkerResult:
+     reviewed = (governance or EvidenceGovernanceService()).review([response])
+-    summary = response.summary
+-    if not summary and response.research_report is not None:
+-        summary = response.research_report.summary
++    summary = _governed_summary(response, reviewed)
+     return WorkerResult(
+         task_id=response.task_id,
+         worker=response.worker,
+         status=response.status,
+         summary=summary,
+         options=[_candidate_to_option(candidate, response.worker) for candidate in reviewed.candidates],
+         evidence=reviewed.evidence,
+         warnings=reviewed.warnings,
+         is_mock=is_mock,
+     )
+ 
+ 
++def _governed_summary(response: SubagentResponse, reviewed) -> str:
++    if response.status == "failed":
++        return response.summary or "Domain subagent execution failed."
++    if reviewed.claims:
++        return " ".join(claim.text for claim in reviewed.claims)
++    if reviewed.candidates:
++        candidate_count = len(reviewed.candidates)
++        noun = "candidate" if candidate_count == 1 else "candidates"
++        return f"{candidate_count} evidence-governed {noun} retained."
++    if reviewed.evidence:
++        evidence_count = len(reviewed.evidence)
++        noun = "evidence item" if evidence_count == 1 else "evidence items"
++        return f"{evidence_count} {noun} retained; no evidence-bound claims retained."
++    return "No evidence-governed claims retained."
++
++
+ def _coerce_subagent_response(result: Any, task: ResearchTask) -> SubagentResponse:
+     if isinstance(result, SubagentResponse):
+         return result
+     if isinstance(result, WorkerResult):
+         return _worker_result_to_subagent_response(result)
+     try:
+         return SubagentResponse.model_validate(result)
+     except Exception:
+         return _worker_result_to_subagent_response(WorkerResult.model_validate(result))
+ 
+@@ -397,29 +411,30 @@ def create_supervisor_graph(
+ 
+     async def worker_node(state: SupervisorState) -> dict[str, Any]:
+         requirement = TravelRequirement.model_validate(state["requirement"])
+         task = ResearchTask.model_validate(state["task"])
+         await emit(state, "worker_started", {"task_id": task.id, "worker": task.task_type})
+         is_mock = False
+         try:
+             raw_result = await registry.run(task, requirement)
+             is_mock = isinstance(raw_result, WorkerResult) and raw_result.is_mock
+             response = _coerce_subagent_response(raw_result, task)
++            result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
+         except Exception as exc:
+-            response = SubagentResponse(
++            result = WorkerResult(
+                 task_id=task.id,
+                 worker=task.task_type,
+                 status="failed",
+                 summary="Domain subagent execution failed.",
+                 warnings=[f"{type(exc).__name__}: {exc}"],
++                is_mock=is_mock,
+             )
+-        result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
+         await emit(state, "worker_completed", result.model_dump(mode="json"))
+         if result.evidence:
+             await emit(state, "evidence_collected", {"task_id": task.id, "count": len(result.evidence)})
+         return {"worker_results": {task.id: result.model_dump(mode="json")}}
+ 
+     async def advance_node(state: SupervisorState) -> dict[str, Any]:
+         return {"group_index": state.get("group_index", 0) + 1}
+ 
+     async def route_planner_node(state: SupervisorState) -> dict[str, Any]:
+         requirement = TravelRequirement.model_validate(state["requirement"])
+diff --git a/app/governance/evidence.py b/app/governance/evidence.py
+index 1146fa4..f8bab19 100644
+--- a/app/governance/evidence.py
++++ b/app/governance/evidence.py
+@@ -106,73 +106,88 @@ class EvidenceGovernanceService:
+ 
+     def _review_evidence(
+         self,
+         responses: list[SubagentResponse],
+         warnings: list[str],
+     ) -> tuple[list[Evidence], dict[str, str | None]]:
+         id_remap: dict[str, str | None] = {}
+         evidence_by_key: dict[str, Evidence] = {}
+         order_by_key: dict[str, int] = {}
+         key_by_evidence_id: dict[str, str] = {}
+-        now = self._now or datetime.now(timezone.utc)
++        evidence_ids_by_key: dict[str, set[str]] = {}
++        now = self._as_aware_utc(self._now or datetime.now(timezone.utc))
+ 
+         for response in responses:
+             evidence_items = list(response.evidence)
+             if response.research_report is not None:
+                 evidence_items.extend(response.research_report.evidence)
+ 
+             for evidence in evidence_items:
+                 if not evidence.id:
+                     warnings.append(f"Dropped evidence without id for task {response.task_id}.")
+                     continue
+                 key = self._dedupe_key(evidence)
+-                if evidence.valid_until is not None and evidence.valid_until < now:
++                valid_until = (
++                    self._as_aware_utc(evidence.valid_until)
++                    if evidence.valid_until is not None
++                    else None
++                )
++                if valid_until is not None:
++                    evidence = evidence.model_copy(update={"valid_until": valid_until})
++                if valid_until is not None and valid_until < now:
+                     id_remap[evidence.id] = None
+                     warnings.append(f"Dropped expired evidence {evidence.id} for task {response.task_id}.")
+                     continue
+                 if evidence.id in key_by_evidence_id and key_by_evidence_id[evidence.id] != key:
+                     id_remap[evidence.id] = None
+                     warnings.append(f"Dropped conflicting duplicate evidence id {evidence.id}.")
+                     continue
+ 
+                 key_by_evidence_id[evidence.id] = key
+                 existing = evidence_by_key.get(key)
+                 if existing is None:
+                     evidence_by_key[key] = evidence
+                     order_by_key[key] = len(order_by_key)
++                    evidence_ids_by_key[key] = {evidence.id}
+                     id_remap[evidence.id] = evidence.id
+                     continue
+ 
++                evidence_ids_by_key.setdefault(key, set()).add(evidence.id)
+                 preferred = self._preferred_evidence(existing, evidence)
+                 evidence_by_key[key] = preferred
+                 kept_id = preferred.id
+-                id_remap[evidence.id] = kept_id
+-                if existing.id:
+-                    id_remap[existing.id] = kept_id
++                for duplicate_id in evidence_ids_by_key[key]:
++                    id_remap[duplicate_id] = kept_id
+                 warnings.append(
+                     f"Deduplicated evidence {evidence.id} into {kept_id} for task {response.task_id}."
+                 )
+ 
+         ordered_keys = sorted(order_by_key, key=order_by_key.__getitem__)
+         return [evidence_by_key[key] for key in ordered_keys], id_remap
+ 
+     @staticmethod
+     def _dedupe_key(evidence: Evidence) -> str:
+         if evidence.source_url:
+             return f"url:{evidence.source_url.strip().lower()}"
+         normalized_content = " ".join(evidence.content.split()).lower()
+         return f"content:{normalized_content}"
+ 
+     @staticmethod
+     def _source_rank(evidence: Evidence) -> tuple[int, float]:
+         return (SOURCE_RANKS.get(evidence.source.lower(), 99), -evidence.confidence)
+ 
++    @staticmethod
++    def _as_aware_utc(value: datetime) -> datetime:
++        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
++            return value.replace(tzinfo=timezone.utc)
++        return value.astimezone(timezone.utc)
++
+     def _preferred_evidence(self, current: Evidence, candidate: Evidence) -> Evidence:
+         if self._source_rank(candidate) < self._source_rank(current):
+             return candidate
+         return current
+ 
+     @staticmethod
+     def _remap_ids(
+         evidence_ids: list[str],
+         id_remap: dict[str, str | None],
+         usable_ids: set[str | None],
+diff --git a/tests/test_evidence_governance.py b/tests/test_evidence_governance.py
+index 04c5093..1b28fd1 100644
+--- a/tests/test_evidence_governance.py
++++ b/tests/test_evidence_governance.py
+@@ -78,20 +78,86 @@ def test_governance_deduplicates_evidence_and_keeps_claim_bindings():
+             )
+         ]
+     )
+ 
+     assert [item.id for item in reviewed.evidence] == ["ev-a"]
+     assert reviewed.claims[0].evidence_ids == ["ev-a"]
+     assert reviewed.candidates[0].evidence_ids == ["ev-a"]
+     assert any("duplicate" in warning.lower() for warning in reviewed.warnings)
+ 
+ 
++def test_governance_remaps_all_duplicate_ids_to_final_preferred_evidence():
++    fallback = Evidence(
++        id="ev-a",
++        content="Museum requires advance booking.",
++        source="fallback",
++        source_url="https://example.test/museum",
++    )
++    search = Evidence(
++        id="ev-b",
++        content="Museum requires advance booking.",
++        source="search",
++        source_url="https://example.test/museum",
++    )
++    official = Evidence(
++        id="ev-c",
++        content="Museum requires advance booking.",
++        source="official",
++        source_url="https://example.test/museum",
++    )
++
++    reviewed = EvidenceGovernanceService().review(
++        [
++            _response(
++                claims=[Claim(text="Museum requires advance booking.", evidence_ids=["ev-a"])],
++                candidates=[EvidenceBoundCandidate(name="Museum", evidence_ids=["ev-a"])],
++                evidence=[fallback, search, official],
++            )
++        ]
++    )
++
++    assert [item.id for item in reviewed.evidence] == ["ev-c"]
++    assert reviewed.claims[0].evidence_ids == ["ev-c"]
++    assert reviewed.candidates[0].evidence_ids == ["ev-c"]
++
++
++def test_governance_normalizes_naive_valid_until_before_expiry_check():
++    now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
++    expired_naive = Evidence(
++        id="ev-naive-expired",
++        content="Seasonal closure ended yesterday.",
++        source="official",
++        valid_until=datetime(2026, 8, 1, 11),
++    )
++    current_naive = Evidence(
++        id="ev-naive-current",
++        content="Museum is open this afternoon.",
++        source="official",
++        valid_until=datetime(2026, 8, 1, 13),
++    )
++
++    reviewed = EvidenceGovernanceService(now=now).review(
++        [
++            _response(
++                claims=[
++                    Claim(text="Expired naive claim", evidence_ids=["ev-naive-expired"]),
++                    Claim(text="Current naive claim", evidence_ids=["ev-naive-current"]),
++                ],
++                evidence=[expired_naive, current_naive],
++            )
++        ]
++    )
++
++    assert [item.id for item in reviewed.evidence] == ["ev-naive-current"]
++    assert [claim.text for claim in reviewed.claims] == ["Current naive claim"]
++
++
+ def test_governance_preserves_conflicts_and_warnings_without_resolving_them():
+     conflict = ResearchConflict(
+         fact_key="museum-hours",
+         values=["open", "closed"],
+         evidence_ids=["ev-open", "ev-closed"],
+         description="Sources disagree about current opening status.",
+     )
+     report = ResearchReport(
+         status="partial",
+         conflicts=[conflict],
+diff --git a/tests/test_phase1_planning_contracts.py b/tests/test_phase1_planning_contracts.py
+index 648fe75..c951390 100644
+--- a/tests/test_phase1_planning_contracts.py
++++ b/tests/test_phase1_planning_contracts.py
+@@ -41,20 +41,25 @@ def test_planner_creates_single_parallel_group_for_confirmed_destination():
+     }
+     assert len({task.id for task in tasks}) == 5
+     assert all(task.dependencies == [] for task in tasks)
+ 
+     groups = parallel_groups(tasks)
+     assert [{task.task_type for task in group} for group in groups] == [
+         {"attractions", "transport", "hotel", "food", "weather"},
+     ]
+ 
+ 
++def test_planner_docstring_describes_single_independent_task_group():
++    assert "single parallel group" in create_research_plan.__doc__
++    assert "five independent" in create_research_plan.__doc__
++
++
+ def test_parallel_groups_respects_dependencies():
+     first = ResearchTask(task_type="attractions", query="attractions")
+     second = ResearchTask(task_type="hotel", query="hotel", dependencies=[first.id])
+ 
+     groups = parallel_groups([second, first])
+ 
+     assert [[task.id for task in group] for group in groups] == [[first.id], [second.id]]
+ 
+ 
+ def test_parallel_groups_rejects_cycles():
+diff --git a/tests/test_supervisor_subagent_merge.py b/tests/test_supervisor_subagent_merge.py
+index 8dfd8a2..65e03b4 100644
+--- a/tests/test_supervisor_subagent_merge.py
++++ b/tests/test_supervisor_subagent_merge.py
+@@ -1,17 +1,21 @@
+ from datetime import date
+ 
+ import pytest
+ 
+ from app.agents.planner import create_research_plan, parallel_groups
+ from app.agents.subagents.registry import SubagentRegistry
+-from app.agents.supervisor import merge_worker_results, run_travel_planning
++from app.agents.supervisor import (
++    _subagent_response_to_worker_result,
++    merge_worker_results,
++    run_travel_planning,
++)
+ from app.schemas.planning import Evidence, ResearchTask, TravelRequirement
+ from app.schemas.research import Claim, EvidenceBoundCandidate, SubagentResponse
+ 
+ 
+ def _requirement() -> TravelRequirement:
+     return TravelRequirement(
+         origin="Shanghai",
+         destination="Chengdu",
+         departure_date=date(2026, 8, 1),
+         days=3,
+@@ -38,33 +42,67 @@ def test_supervisor_merges_parallel_results_by_task_id():
+ 
+ 
+ def test_supervisor_replaces_retry_result_for_same_task_id():
+     merged = merge_worker_results({"task-a": _response("task-a", "attractions", status="failed")}, {})
+     merged = merge_worker_results(merged, {"task-a": _response("task-a", "attractions", status="completed")})
+ 
+     assert set(merged) == {"task-a"}
+     assert merged["task-a"]["status"] == "completed"
+ 
+ 
++def test_worker_result_summary_uses_only_governed_claims():
++    response = SubagentResponse(
++        task_id="task-a",
++        worker="attractions",
++        status="completed",
++        summary="Unsupported summary should not reach synthesis.",
++        claims=[
++            Claim(text="Supported museum fact.", evidence_ids=["ev-supported"]),
++            Claim(text="Unsupported museum fact.", evidence_ids=["missing"]),
++        ],
++        evidence=[Evidence(id="ev-supported", content="Museum source text.", source="official")],
++    )
++
++    result = _subagent_response_to_worker_result(response)
++
++    assert result.summary == "Supported museum fact."
++    assert "Unsupported" not in result.summary
++
++
+ def test_confirmed_destination_plan_creates_five_independent_tasks():
+     tasks = create_research_plan(_requirement())
+ 
+     assert len(tasks) == 5
+     assert all(task.dependencies == [] for task in tasks)
+     assert len(parallel_groups(tasks)) == 1
+ 
+ 
+ class FailingWeatherSubagent:
+     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> SubagentResponse:
+         raise RuntimeError("weather provider crashed")
+ 
+ 
++class MalformedAttractionsSubagent:
++    async def run(self, task: ResearchTask, requirement: TravelRequirement) -> SubagentResponse:
++        return SubagentResponse.model_construct(
++            task_id=task.id,
++            worker=task.task_type,
++            status="completed",
++            summary="malformed attractions response",
++            claims=[object()],
++            candidates=[],
++            evidence=[],
++            research_report=None,
++            warnings=[],
++        )
++
++
+ class StaticSubagent:
+     async def run(self, task: ResearchTask, requirement: TravelRequirement) -> SubagentResponse:
+         return SubagentResponse(
+             task_id=task.id,
+             worker=task.task_type,
+             status="completed",
+             summary=f"{task.task_type} ok",
+             claims=[Claim(text=f"{task.task_type} evidence", evidence_ids=[f"{task.id}-ev"])],
+             candidates=[EvidenceBoundCandidate(name=f"{task.task_type} option", evidence_ids=[f"{task.id}-ev"])],
+             evidence=[Evidence(id=f"{task.id}-ev", content=f"{task.task_type} evidence", source="official")],
+@@ -83,10 +121,31 @@ async def test_subagent_failure_does_not_stop_other_branches():
+             "weather": FailingWeatherSubagent(),
+         }
+     )
+ 
+     draft = await run_travel_planning(_requirement(), registry)
+     results = {result.worker: result for result in draft.worker_results}
+ 
+     assert set(results) == {"attractions", "transport", "hotel", "food", "weather"}
+     assert results["weather"].status == "failed"
+     assert all(results[worker].status == "completed" for worker in {"attractions", "transport", "hotel", "food"})
++
++
++@pytest.mark.asyncio
++async def test_governance_failure_does_not_stop_other_branches():
++    shared = StaticSubagent()
++    registry = SubagentRegistry(
++        {
++            "attractions": MalformedAttractionsSubagent(),
++            "transport": shared,
++            "hotel": shared,
++            "food": shared,
++            "weather": shared,
++        }
++    )
++
++    draft = await run_travel_planning(_requirement(), registry)
++    results = {result.worker: result for result in draft.worker_results}
++
++    assert set(results) == {"attractions", "transport", "hotel", "food", "weather"}
++    assert results["attractions"].status == "failed"
++    assert all(results[worker].status == "completed" for worker in {"transport", "hotel", "food", "weather"})

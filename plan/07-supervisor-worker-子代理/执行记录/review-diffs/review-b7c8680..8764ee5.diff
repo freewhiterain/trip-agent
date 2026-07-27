@@ -1,0 +1,464 @@
+# Review package: b7c8680..8764ee5
+
+## Commits
+8764ee5 fix: normalize subagent tool outputs
+ed2b540 feat: add domain subagent tool policies
+
+## Files changed
+ app/agents/subagents/__init__.py    |   2 +
+ app/agents/subagents/tool_policy.py |  37 +++++++
+ app/agents/subagents/tools.py       | 192 ++++++++++++++++++++++++++++++++++++
+ app/mcp_core/client.py              |  22 +++++
+ tests/test_subagent_tool_policy.py  | 138 ++++++++++++++++++++++++++
+ 5 files changed, 391 insertions(+)
+
+## Diff
+diff --git a/app/agents/subagents/__init__.py b/app/agents/subagents/__init__.py
+new file mode 100644
+index 0000000..b79f874
+--- /dev/null
++++ b/app/agents/subagents/__init__.py
+@@ -0,0 +1,2 @@
++"""Domain subagent building blocks."""
++
+diff --git a/app/agents/subagents/tool_policy.py b/app/agents/subagents/tool_policy.py
+new file mode 100644
+index 0000000..3fc479e
+--- /dev/null
++++ b/app/agents/subagents/tool_policy.py
+@@ -0,0 +1,37 @@
++"""Explicit read-only tool policies for domain subagents."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++from app.schemas.planning import TaskType
++
++
++_POLICIES: dict[TaskType, frozenset[str]] = {
++    "weather": frozenset({"weather_mcp", "weather_fallback_api"}),
++    "transport": frozenset({"transport_mcp", "search_mcp"}),
++    "attractions": frozenset({"local_rag", "search_mcp", "deep_research"}),
++    "hotel": frozenset({"local_rag", "hotel_mcp", "search_mcp", "deep_research"}),
++    "food": frozenset({"local_rag", "search_mcp", "deep_research"}),
++}
++
++
++@dataclass(frozen=True, slots=True)
++class ToolPolicy:
++    """The capabilities a domain subagent may request."""
++
++    worker: TaskType
++    allowed_tools: frozenset[str]
++    allow_deep_research: bool
++
++    @classmethod
++    def for_worker(cls, worker: TaskType) -> "ToolPolicy":
++        if worker not in _POLICIES:
++            raise ValueError(f"Unsupported subagent worker: {worker}")
++        allowed = _POLICIES[worker]
++        return cls(
++            worker=worker,
++            allowed_tools=allowed,
++            allow_deep_research="deep_research" in allowed,
++        )
++
+diff --git a/app/agents/subagents/tools.py b/app/agents/subagents/tools.py
+new file mode 100644
+index 0000000..aeb8bbc
+--- /dev/null
++++ b/app/agents/subagents/tools.py
+@@ -0,0 +1,192 @@
++"""Safe normalization for read-only subagent tool results."""
++
++from __future__ import annotations
++
++import inspect
++from collections.abc import Awaitable, Callable, Mapping
++from dataclasses import dataclass
++from typing import Any, Literal
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from app.schemas.planning import Evidence, TaskType
++
++
++class ProviderError(BaseModel):
++    """A safe, typed provider failure without raw upstream payloads."""
++
++    model_config = ConfigDict(frozen=True)
++
++    provider: str
++    code: Literal["unavailable", "invalid_response", "empty_result"]
++    message: str = Field(min_length=1)
++
++
++@dataclass(slots=True)
++class ReadOnlyTool:
++    """Adapter that prevents raw provider results from reaching a subagent."""
++
++    name: str
++    provider: str
++    _handler: Callable[[Any], Any]
++
++    async def ainvoke(self, payload: Any) -> list[Evidence | ProviderError]:
++        try:
++            result = self._handler(payload)
++            if inspect.isawaitable(result):
++                result = await result
++        except Exception as exc:
++            return normalize_tool_result(self.provider, exc)
++        return normalize_tool_result(self.provider, result)
++
++
++def _error(provider: str, code: Literal["unavailable", "invalid_response", "empty_result"]) -> ProviderError:
++    return ProviderError(provider=provider, code=code, message=f"{provider} provider is unavailable")
++
++
++_HIDDEN_METADATA_KEYS = {
++    "api_key", "authorization", "headers", "internal_trace", "password",
++    "raw", "request", "response", "secret", "token",
++}
++
++
++def _sanitize_evidence(item: Evidence | Mapping[str, Any]) -> Evidence:
++    if isinstance(item, Evidence):
++        data = item.model_dump(mode="python")
++    else:
++        data = dict(item)
++    metadata = data.get("metadata") or {}
++    if isinstance(metadata, Mapping):
++        data["metadata"] = {
++            key: value
++            for key, value in metadata.items()
++            if str(key).casefold() not in _HIDDEN_METADATA_KEYS
++        }
++    else:
++        data["metadata"] = {}
++    return Evidence.model_validate(data)
++
++
++def normalize_tool_result(provider: str, payload: Any) -> list[Evidence | ProviderError]:
++    """Keep only validated evidence or a sanitized provider error."""
++
++    if isinstance(payload, BaseException):
++        return [_error(provider, "unavailable")]
++
++    raw_items: Any = payload
++    if isinstance(payload, BaseModel):
++        raw_items = payload.model_dump(mode="python")
++    if isinstance(raw_items, Mapping):
++        status = raw_items.get("status")
++        if status in {"failed", "unavailable"} or raw_items.get("error"):
++            return [_error(provider, "unavailable")]
++        raw_items = raw_items.get("evidence", [])
++
++    if isinstance(raw_items, Evidence):
++        return [_sanitize_evidence(raw_items)]
++    if not isinstance(raw_items, list):
++        return [_error(provider, "invalid_response")]
++    if not raw_items:
++        return [_error(provider, "empty_result")]
++
++    evidence: list[Evidence] = []
++    for item in raw_items:
++        try:
++            evidence.append(_sanitize_evidence(item))
++        except Exception:
++            return [_error(provider, "invalid_response")]
++    return evidence
++
++
++async def build_subagent_tools(
++    worker: TaskType,
++    policy: "ToolPolicy | None" = None,
++    *,
++    mcp_manager: Any | None = None,
++    knowledge: Any | None = None,
++    weather_adapter: Any | None = None,
++    search_adapter: Any | None = None,
++    deep_research_service: Any | None = None,
++) -> list[Any]:
++    """Build normalized MCP and non-MCP tools for one domain worker."""
++
++    from app.agents.subagents.tool_policy import ToolPolicy
++    from app.mcp_core.client import get_mcp_client
++
++    canonical = ToolPolicy.for_worker(worker)
++    if policy is not None and policy.worker != worker:
++        raise ValueError("Tool policy worker does not match requested worker")
++    manager = mcp_manager or await get_mcp_client()
++    mcp_tools = await manager.get_allowed_tools(canonical.allowed_tools)
++    tools: list[ReadOnlyTool] = []
++    mcp_providers = {
++        "get_weather": "weather_mcp",
++        "get_transport": "transport_mcp",
++        "search_hotels": "hotel_mcp",
++        "get_hotel_availability": "hotel_mcp",
++        "web_search": "search_mcp",
++    }
++    for tool in mcp_tools:
++        name = getattr(tool, "name", "")
++        provider = mcp_providers.get(name)
++        if provider is None:
++            continue
++
++        async def invoke_mcp(payload: Any, *, source=tool) -> Any:
++            method = getattr(source, "ainvoke", None) or getattr(source, "arun", None)
++            if method is not None:
++                return await method(payload)
++            return source.invoke(payload)
++
++        tools.append(ReadOnlyTool(name=name, provider=provider, _handler=invoke_mcp))
++
++    if "local_rag" in canonical.allowed_tools:
++        if knowledge is None:
++            from app.agents.workers.local_knowledge import get_local_knowledge_service
++            knowledge = get_local_knowledge_service()
++
++        async def invoke_rag(payload: Mapping[str, Any]) -> Any:
++            return knowledge.search_destination(
++                str(payload["destination"]),
++                payload.get("category", worker),
++                str(payload["query"]),
++            )
++
++        tools.append(ReadOnlyTool(name="local_rag", provider="local_rag", _handler=invoke_rag))
++
++    if "weather_fallback_api" in canonical.allowed_tools:
++        if weather_adapter is None:
++            from app.mcp_core.adapters.weather import AmapWeatherAdapter
++            weather_adapter = AmapWeatherAdapter()
++
++        async def invoke_weather(payload: Mapping[str, Any]) -> Any:
++            return await weather_adapter.query(
++                str(payload["city"]), bool(payload.get("forecast", True))
++            )
++
++        tools.append(ReadOnlyTool(
++            name="weather_fallback_api",
++            provider="weather_fallback_api",
++            _handler=invoke_weather,
++        ))
++
++    if "deep_research" in canonical.allowed_tools:
++        if deep_research_service is None:
++            from app.research.deep_research import DeepResearchService
++            from app.mcp_core.adapters.search import TavilySearchAdapter
++            search_adapter = search_adapter or TavilySearchAdapter()
++            deep_research_service = DeepResearchService(search_adapter.search)
++
++        async def invoke_deep_research(payload: Mapping[str, Any]) -> Any:
++            return await deep_research_service.research(
++                str(payload["query"]),
++                int(payload.get("max_results_per_query", 3)),
++            )
++
++        tools.append(ReadOnlyTool(
++            name="deep_research",
++            provider="deep_research",
++            _handler=invoke_deep_research,
++        ))
++
++    return tools
+diff --git a/app/mcp_core/client.py b/app/mcp_core/client.py
+index 0c69c59..0113aec 100644
+--- a/app/mcp_core/client.py
++++ b/app/mcp_core/client.py
+@@ -1,15 +1,16 @@
+ """
+ MCP 客户端管理器
+ 管理所有 MCP 服务连接
+ """
+ import asyncio
++from collections.abc import Collection
+ from typing import Optional
+ from app.utils.logger import app_logger
+ 
+ 
+ class MCPClientManager:
+     """MCP 客户端管理器（单例模式）"""
+ 
+     _instance: Optional['MCPClientManager'] = None
+     _lock = asyncio.Lock()
+ 
+@@ -57,13 +58,34 @@ class MCPClientManager:
+     async def get_tools(self) -> list:
+         """获取所有 MCP 工具"""
+         if self.client is None:
+             return []
+         try:
+             return await self.client.get_tools()
+         except Exception as e:
+             app_logger.error(f"❌ 获取 MCP 工具失败: {e}")
+             return []
+ 
++    async def get_allowed_tools(self, allowed_providers: Collection[str]) -> list:
++        """Return only known read-only MCP tools for the requested providers."""
++        provider_tool_names = {
++            "weather_mcp": {"get_weather"},
++            "transport_mcp": {"get_transport"},
++            "hotel_mcp": {"search_hotels", "get_hotel_availability"},
++            "search_mcp": {"web_search"},
++        }
++        allowed_names = {
++            name
++            for provider in allowed_providers
++            for name in provider_tool_names.get(provider, set())
++        }
++        if not allowed_names:
++            return []
++        return [
++            tool
++            for tool in await self.get_tools()
++            if getattr(tool, "name", None) in allowed_names
++        ]
++
+ 
+ async def get_mcp_client() -> MCPClientManager:
+     return await MCPClientManager.get_instance()
+diff --git a/tests/test_subagent_tool_policy.py b/tests/test_subagent_tool_policy.py
+new file mode 100644
+index 0000000..6c7490e
+--- /dev/null
++++ b/tests/test_subagent_tool_policy.py
+@@ -0,0 +1,138 @@
++import pytest
++
++from app.agents.subagents.tool_policy import ToolPolicy
++from app.agents.subagents.tools import (
++    ProviderError,
++    build_subagent_tools,
++    normalize_tool_result,
++)
++from app.mcp_core.client import MCPClientManager
++from app.schemas.planning import Evidence
++
++
++def test_weather_policy_excludes_rag_and_deep_research():
++    policy = ToolPolicy.for_worker("weather")
++
++    assert policy.allowed_tools == {"weather_mcp", "weather_fallback_api"}
++    assert policy.allow_deep_research is False
++
++
++def test_attractions_policy_allows_rag_search_and_deep_research():
++    policy = ToolPolicy.for_worker("attractions")
++
++    assert {"local_rag", "search_mcp"}.issubset(policy.allowed_tools)
++    assert policy.allow_deep_research is True
++
++
++def test_policy_matrix_is_explicit_for_all_domain_workers():
++    assert ToolPolicy.for_worker("transport").allowed_tools == {"transport_mcp", "search_mcp"}
++    assert ToolPolicy.for_worker("hotel").allowed_tools == {
++        "local_rag", "hotel_mcp", "search_mcp", "deep_research"
++    }
++    assert ToolPolicy.for_worker("food").allowed_tools == {
++        "local_rag", "search_mcp", "deep_research"
++    }
++
++
++def test_policy_rejects_unknown_workers():
++    with pytest.raises(ValueError, match="Unsupported subagent worker"):
++        ToolPolicy.for_worker("payments")
++
++
++@pytest.mark.asyncio
++async def test_mcp_manager_exposes_only_allowlisted_read_only_tools():
++    class FakeTool:
++        def __init__(self, name: str):
++            self.name = name
++
++    class FakeClient:
++        async def get_tools(self):
++            return [
++                FakeTool("get_weather"),
++                FakeTool("web_search"),
++                FakeTool("delete_all_trips"),
++            ]
++
++    manager = MCPClientManager()
++    manager.client = FakeClient()
++
++    tools = await manager.get_allowed_tools({"weather_mcp", "delete_all_trips"})
++
++    assert [tool.name for tool in tools] == ["get_weather"]
++
++
++@pytest.mark.asyncio
++async def test_build_tools_wraps_mcp_and_non_mcp_providers_without_write_tools():
++    class FakeTool:
++        name = "get_weather"
++
++        async def ainvoke(self, payload):
++            return {
++                "status": "completed",
++                "evidence": [{"content": payload["city"], "source": "weather"}],
++                "internal_trace": "hidden",
++            }
++
++    class FakeManager:
++        async def get_allowed_tools(self, allowed_providers):
++            return [FakeTool()]
++
++    class FakeWeather:
++        async def query(self, city, forecast=True):
++            return [Evidence(content=city, source="fallback")]
++
++    tools = await build_subagent_tools(
++        "weather",
++        mcp_manager=FakeManager(),
++        weather_adapter=FakeWeather(),
++    )
++
++    assert {tool.name for tool in tools} == {"get_weather", "weather_fallback_api"}
++    result = await next(tool for tool in tools if tool.name == "get_weather").ainvoke({"city": "成都"})
++    assert result[0].content == "成都"
++    assert not hasattr(result[0], "internal_trace")
++
++
++def test_normalizer_strips_hidden_metadata_from_evidence():
++    result = normalize_tool_result(
++        "search_mcp",
++        {
++            "evidence": [{
++                "content": "public result",
++                "source": "search",
++                "metadata": {"raw": {"api_key": "secret"}, "provider": "tavily"},
++            }]
++        },
++    )
++
++    assert result[0].metadata == {"provider": "tavily"}
++
++
++def test_normalizer_returns_evidence_without_the_hidden_provider_payload():
++    result = normalize_tool_result(
++        "weather_mcp",
++        {
++            "status": "completed",
++            "evidence": [{"content": "Clear skies", "source": "weather provider"}],
++            "internal_trace": "do-not-return",
++        },
++    )
++
++    assert len(result) == 1
++    assert isinstance(result[0], Evidence)
++    assert result[0].content == "Clear skies"
++    assert result[0].source == "weather provider"
++    assert not hasattr(result[0], "internal_trace")
++
++
++def test_normalizer_converts_provider_exceptions_to_sanitized_typed_errors():
++    result = normalize_tool_result(
++        "weather_mcp",
++        RuntimeError("request failed api_key=super-secret-token"),
++    )
++
++    assert len(result) == 1
++    assert isinstance(result[0], ProviderError)
++    assert result[0].provider == "weather_mcp"
++    assert result[0].code == "unavailable"
++    assert "super-secret-token" not in result[0].message

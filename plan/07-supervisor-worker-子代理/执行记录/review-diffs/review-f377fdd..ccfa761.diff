@@ -1,0 +1,673 @@
+﻿# Review package: f377fdd..ccfa761
+
+## Commits
+ccfa761 feat: stream subagent research events
+
+## Files changed
+ .../task-6-report.md                               |  84 ++++++++
+ app/api/v1/tools.py                                |  60 ++++--
+ app/governance/events.py                           | 106 +++++++++-
+ app/schemas/events.py                              |   6 +
+ tests/test_subagent_events_sse.py                  | 229 +++++++++++++++++++++
+ 5 files changed, 471 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md b/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md
+new file mode 100644
+index 0000000..5adbf4c
+--- /dev/null
++++ b/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md
+@@ -0,0 +1,84 @@
++## Task 6 report - 2026-07-26
++
++### Scope
++
++- Added public typed subagent/research SSE event support while preserving legacy `token`, `result`, `error`, `done`, `tool_call`, and `tool_result` payload behavior.
++- Reused the existing durable event service by wrapping the event repository with `PublishingEventRepository` and converting durable task events to public `SSEEvent` frames.
++- Kept streamed research metadata public only: task ID, worker, tool name, round number, evidence count, conflict count, status, and warning codes.
++- Did not modify Task 7 files or user-owned/deleted `.superpowers/sdd` files.
++
++### TDD red
++
++Command:
++
++```powershell
++.venv\Scripts\python.exe -m pytest tests/test_subagent_events_sse.py -q
++```
++
++Result: expected failure before implementation.
++
++```text
++FAILED tests\test_subagent_events_sse.py::test_subagent_events_keep_monotonic_sequence_and_legacy_fields
++FAILED tests\test_subagent_events_sse.py::test_subagent_events_expose_only_public_typed_metadata
++2 failed, 2 warnings
++```
++
++The failure showed the existing stream emitted only `result`, `token`, and `done`, with no subagent research events.
++
++### Implementation
++
++- `app/schemas/events.py`
++  - Added typed public SSE event types for subagent start/completion, evidence collection, subagent tool calls, follow-up searches, and research conflicts.
++- `app/governance/events.py`
++  - Added `task_event_to_sse_event` mapping from durable task events to public SSE metadata.
++  - Sanitized event payloads so hidden reasoning, raw evidence, raw conflicts, and warning text are not streamed.
++- `app/api/v1/tools.py`
++  - Used `PublishingEventRepository` to publish mapped research events into the active tool-result stream while preserving the legacy terminal `result`, `token`, and `done` frames.
++  - Kept sequence ordering monotonic across research and legacy frames.
++- `app/api/v1/chat.py`
++  - Read and checked for compatibility; no code change was required because chat stream event construction and legacy fields remain unchanged.
++- `tests/test_subagent_events_sse.py`
++  - Added focused tests for monotonic ordering, legacy fields, and public-only typed metadata.
++
++### Verification
++
++Command:
++
++```powershell
++.venv\Scripts\python.exe -m pytest tests/test_subagent_events_sse.py -q
++```
++
++Result:
++
++```text
++2 passed, 2 warnings
++```
++
++Command:
++
++```powershell
++.venv\Scripts\python.exe -m pytest tests/test_subagent_events_sse.py tests/test_phase4_api_and_sse.py -q
++```
++
++Result:
++
++```text
++8 passed, 2 warnings
++```
++
++Additional compatibility command:
++
++```powershell
++.venv\Scripts\python.exe -m pytest tests/test_trip_form_tool_flow.py tests/test_main_agent_contracts.py tests/test_main_agent_end_to_end.py -q
++```
++
++Result:
++
++```text
++31 passed, 2 warnings
++```
++
++### Concerns
++
++- The verification commands still emit existing dependency warnings from `langgraph` and `jieba/pkg_resources`; no Task 6 failures were observed.
++- The working tree already contained unrelated deleted `.superpowers/sdd` files and modified Task 7 files before Task 6 work started; these were intentionally left untouched.
+diff --git a/app/api/v1/tools.py b/app/api/v1/tools.py
+index c316f46..28271c8 100644
+--- a/app/api/v1/tools.py
++++ b/app/api/v1/tools.py
+@@ -4,21 +4,21 @@ import asyncio
+ import json
+ from contextlib import suppress
+ from datetime import timedelta
+ 
+ from fastapi import APIRouter, Depends, HTTPException, status
+ from fastapi.responses import StreamingResponse
+ 
+ from app.agents.supervisor import run_travel_planning
+ from app.api.dependencies import get_current_user
+ from app.core.checkpointer import get_checkpointer
+-from app.governance.events import TaskEventService
++from app.governance.events import PublishingEventRepository, TaskEventService, task_event_to_sse_event
+ from app.governance.postgres import PostgresEventRepository
+ from app.governance.tool_invocations import PostgresToolInvocationRepository
+ from app.models.base import async_session_maker
+ from app.models.message import Message
+ from app.models.user import User
+ from app.schemas.events import SSEEvent
+ from app.schemas.planning import TravelRequirement
+ from app.schemas.tools import ToolResultRequest
+ from app.services.open_qa import answer_open_question
+ from app.services.planning import render_plan_markdown
+@@ -156,24 +156,31 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
+         nonlocal sequence
+         sequence += 1
+         return SSEEvent(
+             type=event_type,
+             task_id=call_id,
+             conversation_id=record.conversation_id,
+             sequence=sequence,
+             payload=payload or {},
+         ).legacy_payload()
+ 
++    def research_event_frame(research_event: SSEEvent) -> str:
++        nonlocal sequence
++        sequence += 1
++        research_event.sequence = sequence
++        return sse(research_event.legacy_payload())
++
+     claim_version = None
+     repository = None
+     heartbeat_task = None
+     planning_task = None
++    research_event_task = None
+     processing_guard = None
+     try:
+         repository = PostgresToolInvocationRepository()
+ 
+         if data.status == "recommend_destination":
+             if record.status == "processing":
+                 async for frame in processing_stream(call_id, record.conversation_id):
+                     yield frame
+                 return
+             updated = await repository.update_partial(call_id, user_id, data.partial_values)
+@@ -217,21 +224,30 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
+             elif claim.record.status == "processing":
+                 async for frame in processing_stream(call_id, claim.record.conversation_id):
+                     yield frame
+             else:
+                 raise ValueError("Tool invocation is not available for processing")
+             return
+ 
+         claim_version = claim.claim_version
+         record = claim.record
+         requirement = TravelRequirement(**data.result.model_dump())
+-        event_service = TaskEventService(PostgresEventRepository())
++        research_events: asyncio.Queue[SSEEvent] = asyncio.Queue()
++
++        async def publish_research_event(task_event):
++            research_event = task_event_to_sse_event(task_event)
++            if research_event is not None:
++                await research_events.put(research_event)
++
++        event_service = TaskEventService(
++            PublishingEventRepository(PostgresEventRepository(), publish_research_event)
++        )
+         lease_lost = asyncio.Event()
+         heartbeat_task = asyncio.create_task(
+             processing_heartbeat(
+                 repository,
+                 call_id,
+                 user_id,
+                 claim_version,
+                 PROCESSING_LEASE_TIMEOUT,
+                 lease_lost,
+             ),
+@@ -242,32 +258,50 @@ async def tool_result_stream(call_id: str, data: ToolResultRequest, user_id: str
+                 requirement,
+                 checkpointer=await get_checkpointer(),
+                 event_service=event_service,
+                 task_id=call_id,
+                 user_id=user_id,
+                 conversation_id=record.conversation_id,
+             ),
+             name=f"tool-result-planning:{call_id}",
+         )
+         try:
+-            done, _pending = await asyncio.wait(
+-                {planning_task, heartbeat_task},
+-                return_when=asyncio.FIRST_COMPLETED,
+-            )
+-            if heartbeat_task in done and lease_lost.is_set():
+-                await cancel_and_await_task(planning_task)
+-                planning_task = None
+-                await stop_processing_heartbeat(heartbeat_task)
+-                heartbeat_task = None
+-                raise ProcessingLeaseLostError("processing lease lost")
+-            draft = planning_task.result()
++            while True:
++                research_event_task = asyncio.create_task(
++                    research_events.get(),
++                    name=f"tool-result-research-event:{call_id}",
++                )
++                done, _pending = await asyncio.wait(
++                    {planning_task, heartbeat_task, research_event_task},
++                    return_when=asyncio.FIRST_COMPLETED,
++                )
++                if research_event_task in done:
++                    yield research_event_frame(research_event_task.result())
++                    research_event_task = None
++                    continue
++
++                await cancel_and_await_task(research_event_task)
++                research_event_task = None
++                if heartbeat_task in done and lease_lost.is_set():
++                    await cancel_and_await_task(planning_task)
++                    planning_task = None
++                    await stop_processing_heartbeat(heartbeat_task)
++                    heartbeat_task = None
++                    raise ProcessingLeaseLostError("processing lease lost")
++                if planning_task in done:
++                    draft = planning_task.result()
++                    break
++            while not research_events.empty():
++                yield research_event_frame(research_events.get_nowait())
+         finally:
++            await cancel_and_await_task(research_event_task)
++            research_event_task = None
+             if planning_task is not None and planning_task.done():
+                 planning_task = None
+             await stop_processing_heartbeat(heartbeat_task)
+             heartbeat_task = None
+         if lease_lost.is_set():
+             raise ProcessingLeaseLostError("processing lease lost")
+         assistant_result = draft.model_dump(mode="json")
+         assistant_content = json.dumps(assistant_result, ensure_ascii=False)
+         if hasattr(draft, "itinerary") and hasattr(draft, "requirement"):
+             assistant_content = render_plan_markdown(draft)
+diff --git a/app/governance/events.py b/app/governance/events.py
+index e5d25b8..a673f11 100644
+--- a/app/governance/events.py
++++ b/app/governance/events.py
+@@ -1,19 +1,20 @@
+ """可持久化任务事件的业务接口。"""
+ 
+ from __future__ import annotations
+ 
+ import asyncio
+ from collections.abc import Awaitable, Callable
+-from typing import Protocol
++from typing import Any, Protocol
+ 
+ from app.schemas.governance import TaskEventRecord
++from app.schemas.events import SSEEvent
+ 
+ 
+ class EventRepository(Protocol):
+     async def append(self, event: TaskEventRecord) -> TaskEventRecord: ...
+     async def list(self, task_id: str, user_id: str) -> list[TaskEventRecord]: ...
+ 
+ 
+ class InMemoryEventRepository:
+     def __init__(self):
+         self.events: dict[str, list[TaskEventRecord]] = {}
+@@ -48,20 +49,123 @@ class TaskEventService:
+                 task_id=task_id,
+                 conversation_id=conversation_id,
+                 user_id=user_id,
+                 event_type=event_type,
+                 sequence=1,
+                 payload=payload or {},
+             )
+         )
+ 
+ 
++_PUBLIC_RESEARCH_EVENT_TYPES = {
++    "worker_started": "subagent_started",
++    "subagent_started": "subagent_started",
++    "worker_completed": "subagent_completed",
++    "subagent_completed": "subagent_completed",
++    "evidence_collected": "evidence_collected",
++    "subagent_tool_called": "subagent_tool_call",
++    "tool_called": "subagent_tool_call",
++    "follow_up_search": "follow_up_search",
++    "follow_up_search_started": "follow_up_search",
++    "research_conflict": "research_conflict",
++    "research_conflict_detected": "research_conflict",
++    "conflict_detected": "research_conflict",
++}
++
++
++def _dedupe(values: list[str]) -> list[str]:
++    return list(dict.fromkeys(value for value in values if value))
++
++
++def _warning_code(warning: str) -> str:
++    value = warning.lower()
++    if "max round" in value:
++        return "max_rounds"
++    if "tool call" in value:
++        return "tool_call_limit"
++    if "timeout" in value:
++        return "timeout"
++    if "duplicate" in value:
++        return "duplicate_follow_up"
++    if "conflict" in value:
++        return "conflict"
++    if "unbound" in value:
++        return "unbound_claim"
++    if "search failed" in value:
++        return "search_failed"
++    if "provider" in value or "unavailable" in value:
++        return "provider_unavailable"
++    return "warning"
++
++
++def _warning_codes(payload: dict[str, Any]) -> list[str]:
++    explicit = payload.get("warning_codes")
++    if isinstance(explicit, list):
++        return _dedupe([str(value) for value in explicit])
++    warnings = payload.get("warnings")
++    if isinstance(warnings, list):
++        return _dedupe([_warning_code(str(value)) for value in warnings])
++    return []
++
++
++def _count_from_payload(payload: dict[str, Any], *keys: str) -> int | None:
++    for key in keys:
++        value = payload.get(key)
++        if isinstance(value, int):
++            return value
++        if isinstance(value, list):
++            return len(value)
++    return None
++
++
++def _public_research_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
++    public: dict[str, Any] = {}
++    for key in ("task_id", "worker"):
++        if payload.get(key) is not None:
++            public[key] = payload[key]
++    tool_name = payload.get("tool_name") or payload.get("tool")
++    if tool_name is not None and event_type in {"subagent_tool_call", "follow_up_search"}:
++        public["tool_name"] = tool_name
++    round_number = payload.get("round_number", payload.get("round"))
++    if round_number is not None and event_type in {"subagent_tool_call", "follow_up_search"}:
++        public["round_number"] = round_number
++    if payload.get("status") is not None and event_type == "subagent_completed":
++        public["status"] = payload["status"]
++
++    evidence_count = _count_from_payload(payload, "evidence_count", "count", "evidence")
++    if evidence_count is not None and event_type in {"evidence_collected", "subagent_completed"}:
++        public["evidence_count"] = evidence_count
++
++    conflict_count = _count_from_payload(payload, "conflict_count", "conflicts", "count")
++    if conflict_count is not None and event_type in {"research_conflict", "subagent_completed"}:
++        public["conflict_count"] = conflict_count
++
++    warning_codes = _warning_codes(payload)
++    if warning_codes and event_type == "subagent_completed":
++        public["warning_codes"] = warning_codes
++    return public
++
++
++def task_event_to_sse_event(event: TaskEventRecord) -> SSEEvent | None:
++    """Map durable task events to public SSE metadata without reasoning or evidence text."""
++    sse_type = _PUBLIC_RESEARCH_EVENT_TYPES.get(event.event_type)
++    if sse_type is None:
++        return None
++    return SSEEvent(
++        type=sse_type,
++        task_id=event.task_id,
++        conversation_id=event.conversation_id,
++        sequence=event.sequence,
++        payload=_public_research_payload(sse_type, event.payload),
++    )
++
++
+ class PublishingEventRepository:
+     """持久化事件后同步发布给当前 SSE 消费者。"""
+ 
+     def __init__(self, inner: EventRepository, publish: Callable[[TaskEventRecord], Awaitable[None]]):
+         self.inner = inner
+         self.publish = publish
+ 
+     async def append(self, event: TaskEventRecord) -> TaskEventRecord:
+         stored = await self.inner.append(event)
+         await self.publish(stored)
+diff --git a/app/schemas/events.py b/app/schemas/events.py
+index 4369541..4a36dac 100644
+--- a/app/schemas/events.py
++++ b/app/schemas/events.py
+@@ -12,20 +12,26 @@ SSEType = Literal[
+     "plan",
+     "worker",
+     "evidence",
+     "approval",
+     "token",
+     "result",
+     "error",
+     "done",
+     "tool_call",
+     "tool_result",
++    "subagent_started",
++    "subagent_completed",
++    "evidence_collected",
++    "subagent_tool_call",
++    "follow_up_search",
++    "research_conflict",
+ ]
+ 
+ 
+ class SSEEvent(BaseModel):
+     id: str = Field(default_factory=lambda: uuid4().hex)
+     type: SSEType
+     task_id: str | None = None
+     conversation_id: str | None = None
+     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+     sequence: int | None = None
+diff --git a/tests/test_subagent_events_sse.py b/tests/test_subagent_events_sse.py
+new file mode 100644
+index 0000000..e5e2d8c
+--- /dev/null
++++ b/tests/test_subagent_events_sse.py
+@@ -0,0 +1,229 @@
++import json
++from contextlib import asynccontextmanager
++from datetime import datetime, timezone
++
++import pytest
++
++from app.api.v1 import tools
++from app.governance.tool_invocations import ProcessingOutcome, ToolInvocationRecord
++from app.schemas.tools import ToolResultRequest
++
++
++class InMemoryProcessingRepository:
++    def __init__(self):
++        self.record = ToolInvocationRecord(
++            call_id="call-subagent-events",
++            user_id="user-1",
++            conversation_id="conversation-1",
++            tool="collect_trip_requirements",
++            status="pending",
++            created_at=datetime.now(timezone.utc),
++            updated_at=datetime.now(timezone.utc),
++        )
++
++    async def claim_processing(self, call_id, user_id, _lease_timeout):
++        assert call_id == self.record.call_id
++        assert user_id == self.record.user_id
++        self.record.status = "processing"
++        self.record.version += 1
++        return ProcessingOutcome(
++            record=self.record.model_copy(deep=True),
++            claimed=True,
++            claim_version=self.record.version,
++        )
++
++    async def finish_processing(self, call_id, user_id, expected_version, durable_result, session=None):
++        assert call_id == self.record.call_id
++        assert user_id == self.record.user_id
++        assert expected_version == self.record.version
++        self.record.status = "completed"
++        self.record.result = durable_result
++        self.record.version += 1
++        return self.record.model_copy(deep=True)
++
++    async def release_processing(self, call_id, user_id, expected_version):
++        assert call_id == self.record.call_id
++        assert user_id == self.record.user_id
++        assert expected_version == self.record.version
++        self.record.status = "pending"
++        self.record.version += 1
++        return self.record.model_copy(deep=True)
++
++    async def renew_processing(self, call_id, user_id, expected_version):
++        return (
++            call_id == self.record.call_id
++            and user_id == self.record.user_id
++            and expected_version == self.record.version
++            and self.record.status == "processing"
++        )
++
++
++class RecordingEventRepository:
++    def __init__(self):
++        self.events = []
++
++    async def append(self, event):
++        event.sequence = len(self.events) + 1
++        self.events.append(event)
++        return event
++
++    async def list(self, task_id, user_id):
++        return [
++            event
++            for event in self.events
++            if event.task_id == task_id and event.user_id == user_id
++        ]
++
++
++class RecordingSession:
++    def __init__(self):
++        self.messages = []
++
++    async def __aenter__(self):
++        return self
++
++    async def __aexit__(self, exc_type, exc, traceback):
++        return False
++
++    def begin(self):
++        return self
++
++    def add(self, message):
++        self.messages.append(message)
++
++
++class FakeDraft:
++    def model_dump(self, *, mode):
++        assert mode == "json"
++        return {"destination": "Kyoto", "summary": "confirmed itinerary"}
++
++
++@asynccontextmanager
++async def session_factory(session):
++    yield session
++
++
++def parse_sse(frame):
++    return json.loads(frame.removeprefix("data: ").strip())
++
++
++async def run_fake_planning_stream(monkeypatch):
++    repository = InMemoryProcessingRepository()
++    event_repository = RecordingEventRepository()
++    session = RecordingSession()
++
++    monkeypatch.setattr(tools, "PostgresToolInvocationRepository", lambda: repository)
++    monkeypatch.setattr(tools, "PostgresEventRepository", lambda: event_repository)
++    monkeypatch.setattr(tools, "async_session_maker", lambda: session)
++
++    async def fake_checkpointer():
++        return None
++
++    async def fake_supervisor(requirement, **kwargs):
++        await kwargs["event_service"].emit(
++            task_id=kwargs["task_id"],
++            user_id=kwargs["user_id"],
++            conversation_id=kwargs["conversation_id"],
++            event_type="worker_started",
++            payload={
++                "task_id": "research-attractions",
++                "worker": "attractions",
++                "hidden_reasoning": "do not stream this",
++            },
++        )
++        await kwargs["event_service"].emit(
++            task_id=kwargs["task_id"],
++            user_id=kwargs["user_id"],
++            conversation_id=kwargs["conversation_id"],
++            event_type="evidence_collected",
++            payload={
++                "task_id": "research-attractions",
++                "worker": "attractions",
++                "count": 2,
++                "evidence": [{"content": "secret source excerpt"}],
++            },
++        )
++        await kwargs["event_service"].emit(
++            task_id=kwargs["task_id"],
++            user_id=kwargs["user_id"],
++            conversation_id=kwargs["conversation_id"],
++            event_type="worker_completed",
++            payload={
++                "task_id": "research-attractions",
++                "worker": "attractions",
++                "status": "completed",
++                "summary": "hidden chain of thought",
++                "evidence": [{"content": "secret evidence"}],
++                "warnings": ["Deep Search stopped because max rounds was reached."],
++                "conflicts": [{"details": "secret conflict evidence"}],
++            },
++        )
++        return FakeDraft()
++
++    monkeypatch.setattr(tools, "get_checkpointer", fake_checkpointer)
++    monkeypatch.setattr(tools, "run_travel_planning", fake_supervisor)
++
++    data = ToolResultRequest.model_validate(
++        {
++            "tool": "collect_trip_requirements",
++            "status": "completed",
++            "result": {
++                "destination": "Kyoto",
++                "departure_date": "2026-08-03",
++                "days": 4,
++            },
++        }
++    )
++    return [
++        parse_sse(frame)
++        async for frame in tools.tool_result_stream(
++            repository.record.call_id,
++            data,
++            repository.record.user_id,
++            repository.record.model_copy(deep=True),
++        )
++    ]
++
++
++@pytest.mark.asyncio
++async def test_subagent_events_keep_monotonic_sequence_and_legacy_fields(monkeypatch):
++    events = await run_fake_planning_stream(monkeypatch)
++
++    assert [event["type"] for event in events] == [
++        "subagent_started",
++        "evidence_collected",
++        "subagent_completed",
++        "result",
++        "token",
++        "done",
++    ]
++    assert [event["sequence"] for event in events] == sorted(event["sequence"] for event in events)
++    assert events[-1]["type"] == "done"
++    assert events[4]["content"] == '{"destination": "Kyoto", "summary": "confirmed itinerary"}'
++
++
++@pytest.mark.asyncio
++async def test_subagent_events_expose_only_public_typed_metadata(monkeypatch):
++    events = await run_fake_planning_stream(monkeypatch)
++    research_events = events[:3]
++    serialized = json.dumps(research_events)
++
++    assert "hidden" not in serialized
++    assert "secret" not in serialized
++    assert research_events[0]["payload"] == {
++        "task_id": "research-attractions",
++        "worker": "attractions",
++    }
++    assert research_events[1]["payload"] == {
++        "task_id": "research-attractions",
++        "worker": "attractions",
++        "evidence_count": 2,
++    }
++    assert research_events[2]["payload"] == {
++        "task_id": "research-attractions",
++        "worker": "attractions",
++        "status": "completed",
++        "evidence_count": 1,
++        "conflict_count": 1,
++        "warning_codes": ["max_rounds"],
++    }

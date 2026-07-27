@@ -1,0 +1,154 @@
+# Phase 2 Task 5: Tool-Result Supervisor Event Streaming
+
+## Status and scope
+
+This is a read-only integration analysis. The smallest correct change is confined to the existing `tool_result_stream` orchestration and the existing event repository wrapper; it does not require a new replay API or changes to Supervisor business events.
+
+Inspected surfaces:
+
+- `app/api/v1/tools.py:152-350` (`tool_result_stream`, lease heartbeat, terminal/error handling)
+- `app/governance/events.py:12-71` (`EventRepository`, `TaskEventService`, `PublishingEventRepository`)
+- `app/governance/postgres.py:46-85` (`PostgresEventRepository`)
+- `app/agents/supervisor.py:199-351` (event emission and failure boundary)
+- `app/schemas/events.py:10-50` and `app/schemas/governance.py:28-36`
+- `tests/test_trip_form_tool_flow.py:330-692`, `tests/test_phase3_governance.py:84-112`, and the related tool/recovery tests
+
+## Current contract and gap
+
+`run_travel_planning` already receives `TaskEventService`, and Supervisor emits the required durable events:
+
+- `worker_started`: `{task_id, worker}`
+- `worker_completed`: serialized `WorkerResult` (`worker`, `status`, `summary`, `evidence`, `warnings`)
+- `evidence_collected`: `{task_id, count}` when evidence exists
+- `task_failed`: `{error: exception_class}` before the planning exception is re-raised
+
+`TaskEventService.emit` calls its repository synchronously from the Supervisor coroutine. `PostgresEventRepository.append` persists first and assigns the per-task sequence under `pg_advisory_xact_lock(hashtext(task_id))`. `PublishingEventRepository` already provides the needed persist-then-publish seam, but `tool_result_stream` currently constructs `TaskEventService(PostgresEventRepository())`, so no live consumer receives those records.
+
+The stream currently waits on only `planning_task` and `heartbeat_task` (`tools.py:240-269`) and then emits `result`, `token`, and `done` (`tools.py:270-313`). The transport gap is therefore a bridge, not a second Supervisor event system.
+
+## Recommended integration
+
+Use one unbounded `asyncio.Queue[TaskEventRecord]` per active stream and wrap the durable repository at the existing construction point (`tools.py:227`). The publish callback must be non-blocking:
+
+```python
+async def publish(event: TaskEventRecord) -> None:
+    event_queue.put_nowait(event)
+
+event_repository = PostgresEventRepository()
+event_service = TaskEventService(
+    PublishingEventRepository(event_repository, publish)
+)
+```
+
+The callback is intentionally `put_nowait` on an unbounded queue. The event is durable before the callback runs; an awaited/bounded publish operation could be cancelled after persistence and make Supervisor fail solely because the HTTP consumer disappeared. Queue backpressure is not appropriate for this request because event persistence is the source of truth and the stream must not block Supervisor event commits.
+
+Suggested helper signatures in `app/api/v1/tools.py`:
+
+```python
+async def publish_task_event(
+    event_queue: asyncio.Queue[TaskEventRecord],
+    record: TaskEventRecord,
+) -> None: ...
+
+def event_from_task_record(
+    record: TaskEventRecord,
+    *,
+    sequence: int,
+    conversation_id: str | None,
+) -> dict: ...
+
+async def drain_task_events(
+    event_queue: asyncio.Queue[TaskEventRecord],
+    *,
+    next_task_sequence: int,
+    sequence: int,
+    conversation_id: str | None,
+    buffered: dict[int, TaskEventRecord] | None = None,
+) -> tuple[list[str], int, dict[int, TaskEventRecord]]: ...
+```
+
+The implementation can keep the last two helpers private and use a simpler internal return type. The important properties are: retain records by persisted sequence, emit only contiguous sequences, and return the next expected task sequence plus any not-yet-contiguous records.
+
+### Concurrent stream loop
+
+After claim acquisition, create `event_queue`, `planning_task`, and `heartbeat_task`. Keep a pending `queue.get()` task and repeatedly wait with `asyncio.wait(..., return_when=asyncio.FIRST_COMPLETED)` over:
+
+1. planning completion;
+2. heartbeat completion/lease loss;
+3. the pending queue read.
+
+When the queue read completes, convert that record to SSE immediately, then create the next queue read. `SSEEvent.sequence` remains the response-local monotonically increasing sequence. Put the durable TaskEvent sequence in the event envelope's `sequence` field only if the two are deliberately made identical; the simpler contract is response sequence at top level and `payload.event_sequence` for the persisted sequence. The event's `task_id`, `conversation_id`, timestamp, and id should come from the durable record.
+
+On planning completion, do not emit `result` yet. First cancel/await the queue reader, drain all currently queued records, and verify the durable event list is contiguous through the final persisted record. Since every Supervisor `emit` awaits `append`, planning completion means all events generated by that run have been persisted and the non-blocking publisher has enqueued them. A final `event_repository.list(call_id, user_id)` check is the defensive no-loss boundary for scheduler interleavings; merge any records absent from the queue by sequence, de-duplicate by persisted event id/sequence, and emit them in sequence order. Only then emit the existing `result`, `token`, and `done` frames.
+
+This ordering preserves the required invariant:
+
+```text
+persist event -> enqueue event -> forward all task events -> result -> token -> done
+```
+
+`task_created`, `plan_created`, `route_planned`, `budget_estimated`, `plan_generated`, and `task_completed` should also be forwarded because they are already part of the same Supervisor event stream. Filtering to only the four named event types would leave the persisted stream and live stream inconsistent and could hide terminal progress. The frontend can ignore event types it does not render.
+
+## SSE event shape
+
+Forward the persisted event type as the SSE type, preserving its exact name. The current `SSEType` literal in `app/schemas/events.py:10-22` must be extended to include the Supervisor event names, or replaced with the established string contract if the schema is intentionally open-ended. Do not encode these as generic `worker`/`evidence` types because the requested consumers and existing governance records use the concrete names.
+
+Recommended serialized frame:
+
+```json
+{
+  "id": "sse-id",
+  "type": "worker_completed",
+  "task_id": "call-1",
+  "conversation_id": "conversation-1",
+  "timestamp": "2026-07-23T00:00:00Z",
+  "sequence": 7,
+  "payload": {
+    "event_id": "durable-event-id",
+    "event_sequence": 7,
+    "worker": "weather",
+    "status": "completed",
+    "summary": "...",
+    "evidence": [],
+    "warnings": []
+  }
+}
+```
+
+For `worker_started`, the payload contains `event_id`, `event_sequence`, `task_id` (the research-task id), and `worker`. For `evidence_collected`, it contains `event_id`, `event_sequence`, `task_id`, and `count`. For `task_failed`, it contains `event_id`, `event_sequence`, and the existing sanitized `{error: exception_class}` payload. Do not expose exception text, credentials, or database details. The existing terminal HTTP error remains the retryable `error` SSE followed by `done`.
+
+`legacy_payload()` currently adds compatibility top-level fields only for `token`, `error`, `tool_call`, and `tool_result`; event frames should remain envelope-first and use `payload` for event data.
+
+## Failure, cancellation, and lease semantics
+
+- **Normal completion:** Supervisor emits `task_completed`; the stream drains and forwards it plus every earlier event, then persists the assistant message/result and emits terminal frames. The existing finish transaction and `claim_version` checks remain unchanged.
+- **Supervisor failure:** `run_travel_planning` persists `task_failed` before re-raising. The stream must drain and forward that record before emitting the existing retryable `error` and `done`. Release the processing claim as today.
+- **Heartbeat lease loss:** the heartbeat sets `lease_lost`; cancel and await `planning_task`, stop the heartbeat, drain events that were already persisted/enqueued, then emit the retryable `processing_conflict` error and `done`. Cancellation does not reliably enter Supervisor's `except Exception`, so do not require a synthetic `task_failed` for lease loss.
+- **Client cancellation:** cancel and await the queue-reader, planning task, and heartbeat in `except asyncio.CancelledError`; release the claim with the expected version. Persisted events remain available through the existing `/api/v1/planning/tasks/{task_id}/events` endpoint, but no HTTP stream can guarantee delivery after the client disconnects.
+- **Publisher safety:** use an unbounded queue and `put_nowait`; never let queue-consumer cancellation turn a committed event into a planning failure. The final durable-list reconciliation handles queue scheduling races.
+- **Cleanup:** in `finally`, cancel/await any pending queue reader before releasing the processing guard. Ensure no `tool-result-heartbeat:*`, planning, or event-reader task remains after every exit path.
+
+## History restoration
+
+No new replay API is needed for the assistant result. The existing completion path stores `assistant_result` and `draft` in the durable tool invocation result (`tools.py:274-280`) and stores `extra_info={"tool_result": ..., "assistant_result": assistant_result}` on the assistant `Message` (`tools.py:299-307`). `GET /api/v1/chat/history/{conversation_id}` returns those message records (`chat.py:195-219`), so the existing frontend history reducer can restore the final result/evidence/warnings from `extra_info.assistant_result` or its nested draft. The existing planning event endpoint is already available for governance inspection; adding another replay endpoint is unnecessary for this task.
+
+The live event bridge should not write every transient Supervisor event into chat history. Persisting them in `TaskEvent` remains the governance/audit mechanism; the final assistant message remains the history/reload mechanism.
+
+## Focused tests
+
+Add tests adjacent to `tests/test_trip_form_tool_flow.py` using the existing in-memory invocation/session/event fakes. Keep production and test changes separate from this analysis document.
+
+1. **Publishes and forwards ordered events:** fake Supervisor emits `worker_started`, `worker_completed`, `evidence_collected`, and `task_completed` through the supplied service; assert all are persisted and appear before `result`, `token`, `done`, with contiguous durable/event response sequences.
+2. **Parallel/out-of-order completion:** publish records with durable sequences out of queue arrival order; assert the stream buffers and forwards them in persisted sequence order without duplicates or loss.
+3. **Task failure:** fake Supervisor emits/causes `task_failed`; assert the failure event is streamed before sanitized `error` and `done`, and the claim returns to `pending`.
+4. **Queue drain at completion:** enqueue the final event immediately before the planning task resolves; assert it is delivered before `result` and `done`.
+5. **Lease loss:** force `renew_processing` to return false while Supervisor blocks; assert planning is cancelled, already-persisted events are drained, `processing_conflict` is emitted, and no background heartbeat/reader remains.
+6. **Client cancellation:** consume until a worker event, cancel the consumer, assert planning/heartbeat/reader cleanup and claim release; assert the durable repository still contains committed events.
+7. **Publisher failure isolation:** cancel/close the consumer while a committed event is being published; assert the Supervisor task is not failed by queue publication and the event remains in the repository.
+8. **Existing completion replay:** submit the same completed tool result twice; assert the second response still uses stored `assistant_result` and does not start Supervisor or create duplicate governance events.
+9. **History restoration contract:** assert the saved assistant message contains `extra_info.assistant_result` equal to the streamed final result; no per-event chat-history rows or new replay route are required.
+
+## Blockers
+
+No external blocker is present. One schema integration point is mandatory: `app/schemas/events.py` currently restricts `SSEEvent.type` to generic names and must accept concrete Supervisor event names. The implementation must also preserve the current exact terminal-frame behavior expected by existing tool-flow tests while adding the intermediate event frames.
+

@@ -1,0 +1,1443 @@
+﻿# Review package: 1434b64..da7dfe6
+
+## Commits
+da7dfe6 fix: address Task 7 planning mode review findings
+e0445aa fix: emit real subagent research events
+
+## Files changed
+ .../task-6-report.md                               |  36 +++++
+ .superpowers/sdd/task-7-report.md                  | 133 ++++++++++++++---
+ app/agents/factory.py                              |  82 ++++++++--
+ app/agents/subagents/base.py                       |  48 +++++-
+ app/agents/subagents/registry.py                   |  16 ++
+ app/agents/supervisor.py                           |  38 ++++-
+ app/api/v1/planning.py                             |   7 +-
+ app/api/v1/tools.py                                |   7 +-
+ app/config.py                                      |   2 +
+ app/research/deep_search.py                        |  14 ++
+ app/schemas/planning.py                            |   4 +-
+ tests/test_phase2_mock_rag_e2e.py                  |   3 +-
+ tests/test_subagent_end_to_end.py                  |  16 +-
+ tests/test_subagent_events_sse.py                  | 166 +++++++++++++++++++++
+ tests/test_task7_review_fix.py                     | 159 ++++++++++++++++++++
+ 15 files changed, 688 insertions(+), 43 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md b/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md
+index 5adbf4c..e66c38c 100644
+--- a/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md
++++ b/.superpowers/sdd/2026-07-25-supervisor-worker-subagents-implementation/task-6-report.md
+@@ -75,10 +75,46 @@ Additional compatibility command:
+ Result:
+ 
+ ```text
+ 31 passed, 2 warnings
+ ```
+ 
+ ### Concerns
+ 
+ - The verification commands still emit existing dependency warnings from `langgraph` and `jieba/pkg_resources`; no Task 6 failures were observed.
+ - The working tree already contained unrelated deleted `.superpowers/sdd` files and modified Task 7 files before Task 6 work started; these were intentionally left untouched.
++
++## Task 6 review fix - 2026-07-26
++
++### Review finding addressed
++
++Added a real-path SSE regression scenario covering provider tool calls, a Deep Search follow-up query, and typed research conflicts. The test runs the actual supervisor, `SubagentRegistry`, `DomainSubagent`, provider adapters, `run_deep_search`, and `tool_result_stream`; only non-target workers use legacy-compatible two-argument fakes.
++
++### Implementation
++
++- Added optional event callbacks to `DomainSubagent` provider calls and `run_deep_search` rounds.
++- Emitted sanitized `subagent_tool_called` metadata for actual provider invocations and `follow_up_search` metadata for rounds after the initial search.
++- Emitted `research_conflict` from the supervisor when the typed subagent research report contains conflicts.
++- Preserved legacy registries, workers, and custom Deep Search runners by passing callbacks only when their call signatures accept the optional keyword.
++- Kept event payloads limited to task ID, worker, tool name, round number, conflict count, and existing public metadata.
++
++### TDD red
++
++```text
++.venv\\Scripts\\python.exe -m pytest tests/test_subagent_events_sse.py::test_real_subagent_tool_follow_up_and_conflict_events_are_emitted -q
++1 failed
++AssertionError: assert 'subagent_tool_call' in []
++```
++
++### Verification
++
++```text
++.venv\\Scripts\\python.exe -m pytest tests/test_subagent_events_sse.py tests/test_phase4_api_and_sse.py -q
++9 passed, 2 warnings
++
++.venv\\Scripts\\python.exe -m pytest tests/test_domain_subagents.py tests/test_deep_search_subgraph.py tests/test_subagent_end_to_end.py tests/test_supervisor_subagent_merge.py -q
++33 passed, 1 warning
++```
++
++### Concerns
++
++- Existing dependency warnings from `langgraph` and `jieba/pkg_resources` remain; no Task 6 failures were observed.
+diff --git a/.superpowers/sdd/task-7-report.md b/.superpowers/sdd/task-7-report.md
+index 2d4407d..dbc9965 100644
+--- a/.superpowers/sdd/task-7-report.md
++++ b/.superpowers/sdd/task-7-report.md
+@@ -1,34 +1,123 @@
+-# Task 7 Report: Rename Destination Research To Attractions
++# Task 7: CitationAnnotator (Simplified Scaffold) — Implementation Report
+ 
+-Status: DONE
++## Summary
++Successfully implemented a simplified citation annotator scaffold that attaches evidence sources to answer text without performing sentence-level matching. This provides the interface foundation for future enhancements while maintaining simplicity for the current phase.
+ 
+-## Scope
++## Implementation Details
+ 
+-- Renamed the planning responsibility from `destination` to `attractions`.
+-- Renamed `DestinationWorker` and `app/agents/workers/destination.py` to `AttractionsWorker` and `app/agents/workers/attractions.py`.
+-- Updated planning task types, worker registry, supervisor itinerary lookup, and read-only worker tool name.
+-- Kept the existing `load_destination_evidence` source unchanged; Worker data-source design remains deferred.
++### What Was Implemented
++
++#### 1. `app/rag/citation.py`
++- **AnnotatedAnswer** dataclass: Holds answer text and list of Evidence sources
++- **CitationAnnotator** class: Core service with `annotate()` method
++  - Method signature: `annotate(answer: str, evidence: list[Evidence]) -> AnnotatedAnswer`
++  - Simple implementation: returns AnnotatedAnswer with the provided text and evidence list (converted to list for consistency)
++- **get_citation_annotator()** factory function: Returns a CitationAnnotator instance
++
++Key design decision: The implementation is intentionally simple - it treats all provided evidence as sources for the entire answer. The brief explicitly states this is a scaffold for a future phase, with sentence-level matching deferred to later work (documented in `docs/superpowers/specs/2026-07-24-rag-heavyweight-capabilities-future-design.md`).
++
++#### 2. `tests/test_citation_annotator.py`
++Two test cases covering:
++- **test_annotate_attaches_all_evidence_as_the_answer_sources**: Verifies that the annotator properly attaches multiple evidence items to the answer text
++- **test_annotate_handles_empty_evidence_list**: Verifies the annotator handles the edge case of empty evidence gracefully
+ 
+ ## TDD Evidence
+ 
+-- RED: `.venv\\Scripts\\python.exe -m pytest tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py -q`
+-  - Result: 6 failed, 2 passed.
+-  - Expected failures showed the old `destination` task type, WorkerResult contract, and worker tool name.
+-- GREEN: `.venv\\Scripts\\python.exe -m pytest tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py tests/test_phase6_coordinator.py -q`
+-  - Result: 17 passed.
++### RED Phase (Tests Fail Before Implementation)
++**Command:** `python -m pytest tests/test_citation_annotator.py -v`
++
++**Output:**
++```
++ERROR collecting tests/test_citation_annotator.py
++ImportError while importing test module 'D:\Desktop\project\Trip\tests\test_citation_annotator.py'.
++...
++E   ModuleNotFoundError: No module named 'app.rag.citation'
++=========================== short test summary info ===========================
++ERROR tests/test_citation_annotator.py
++!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
++```
++
++Result: Tests cannot even be collected because the module doesn't exist. This is the expected failure.
++
++### GREEN Phase (Tests Pass After Implementation)
++**Command:** `python -m pytest tests/test_citation_annotator.py -v`
++
++**Output:**
++```
++============================= test session starts =============================
++platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
++collected 2 items
++
++tests/test_citation_annotator.py::test_annotate_attaches_all_evidence_as_the_answer_sources PASSED [ 50%]
++tests/test_citation_annotator.py::test_annotate_handles_empty_evidence_list PASSED [100%]
++
++============================== 2 passed in 0.05s ==============================
++```
++
++Result: All tests pass successfully after implementation.
++
++## Files Changed
++
++### Created Files
++1. **app/rag/citation.py** (28 lines)
++   - Core implementation of CitationAnnotator and related types
++   - Location: D:\Desktop\project\Trip\app\rag\citation.py
++
++2. **tests/test_citation_annotator.py** (23 lines)
++   - Test suite with two comprehensive test cases
++   - Location: D:\Desktop\project\Trip\tests\test_citation_annotator.py
++
++### Git Commit
++- **Commit SHA:** be9b69e
++- **Commit Message:** `feat(rag): add simplified CitationAnnotator scaffold for future sentence-level attribution`
++- **Files Added:** 2 files
++- **Lines Added:** 51
++
++## Self-Review Findings
++
++### Code Quality
++✓ Implementation matches the brief exactly
++✓ All docstring comments preserved from specification
++✓ Follows existing project conventions (dataclass usage, type hints)
++✓ No extraneous features - strictly implements the scaffold
++
++### Test Coverage
++✓ Both test cases from the brief are implemented correctly
++✓ Tests verify the primary behavior (evidence attachment) and edge case (empty evidence)
++✓ Test assertions are clear and unambiguous
++✓ Tests follow the project's pytest patterns
++
++### Architecture Compliance
++✓ Uses existing `Evidence` schema from `app.schemas.planning`
++✓ Provides the three required exports: `AnnotatedAnswer`, `CitationAnnotator`, `get_citation_annotator()`
++✓ No external dependencies beyond what's already in the project
++✓ Positioned correctly in the RAG module hierarchy
++
++### Notes
++- The simplified implementation is intentional and documented. The brief explicitly states that sentence-level citation matching is deferred to a future phase.
++- This task is self-contained and does not depend on Tasks 5 or 6, as specified in the requirements.
++- Step 5 of the brief (full regression test suite) was skipped per instructions - only the targeted test file was run to keep the tests isolated from other concurrent task development.
+ 
+-## Verification
++## Status
++✓ All tests passing
++✓ Commit created with correct message
++✓ No regressions in targeted test suite
++✓ Implementation complete and ready for integration
++## Fix Round: Review Findings
+ 
+-- `git diff --check` for Task 7 implementation and test files passed with no whitespace errors.
+-- Test warnings are pre-existing dependency deprecations and a denied `.pytest_cache` write; they do not affect test results.
++Implemented the Task 7 review fixes without modifying Task 6 event files.
+ 
+-## Git
++- Production planning now routes through `app.agents.factory`: `supervisor` selects the deterministic `WorkerRegistry`, while configured `supervisor_subagents` selects `SubagentRegistry`.
++- `ALLOW_LEGACY_FALLBACK` selects the legacy registry for the no-LLM path when enabled; disabled fallback keeps the subagent registry and still returns without startup failure.
++- Degraded planning is explicit in `TravelPlanDraft.status`, `degraded_reason`, and the stable `planning_degraded:no_llm_or_provider` warning marker.
++- Both planning endpoints delegate through the configured factory runner while preserving local runner injection compatibility for existing tests and callers.
++- Endpoint/default-wiring tests no longer inject a legacy registry into the production path.
+ 
+-- No branch created and no commit made, per instruction.
++Focused verification completed before the final test command:
+ 
+-## P2 Follow-up: Coordinator Responsibility Name
++- Task 7 review-fix tests: 5 passed before the final chat-agent assertion was added.
++- Task 7 subagent end-to-end tests: 6 passed.
++- Task 7 phase 2 endpoint tests: 3 passed.
++- Preference-default, subagent SSE, supervisor, governance, MainAgent, and API/SSE suites passed.
+ 
+-- Updated `SLICE_KEYWORDS` in `app/agents/coordinator.py` so sightseeing keywords route to `attractions`, not `destination`.
+-- Updated the `tests/test_phase6_coordinator.py` registry fixture and added an attractions keyword-routing assertion.
+-- RED verification: `.venv\\Scripts\\python.exe -m pytest tests/test_phase6_coordinator.py -q` returned `1 failed, 9 passed`; the failure showed the old `destination` keyword mapping violated the renamed `TaskType` contract.
+-- The production mapping is now corrected. Per interruption request, the post-fix focused test run was not started; re-run the Task 7 focused suite before treating this follow-up as fully verified.
++The final focused command exposed two stale factory assertions expecting the pre-fix zero-argument supervisor behavior; those assertions were updated to verify the mode-selected registry passed into the graph. The lease-loss test in `test_trip_form_tool_flow.py` remains an unrelated pre-existing failure and was not changed.
+diff --git a/app/agents/factory.py b/app/agents/factory.py
+index 3f91257..c44eb94 100644
+--- a/app/agents/factory.py
++++ b/app/agents/factory.py
+@@ -1,17 +1,81 @@
+-"""旅行 Agent 运行模式选择。"""
++"""Mode-aware planning factories."""
+ 
+-from app.config import SUPPORTED_TRAVEL_AGENT_MODES, settings
++from typing import Any
+ 
++from app.config import (
++    DEGRADED_PLANNING_MARKER,
++    DEGRADED_PLANNING_REASON,
++    SUPPORTED_TRAVEL_AGENT_MODES,
++    settings,
++)
+ 
+-async def create_chat_agent():
+-    """创建规划 Agent；旧 Handoffs 流程已退役，统一走 Supervisor。"""
++
++def _travel_agent_mode() -> str:
+     mode = settings.travel_agent_mode.strip().lower()
+     if mode not in SUPPORTED_TRAVEL_AGENT_MODES:
+         raise ValueError(
+-            f"TRAVEL_AGENT_MODE={settings.travel_agent_mode} 已不受支持,"
+-            "旧 Handoffs 流程已由对话协调器 + Supervisor 取代,"
+-            "请使用 supervisor 或 supervisor_subagents 模式。"
++            f"TRAVEL_AGENT_MODE={settings.travel_agent_mode} is unsupported; "
++            "use supervisor or supervisor_subagents."
+         )
+-    from app.agents.supervisor import create_supervisor_agent
++    return mode
++
++
++def create_planning_registry() -> tuple[Any, str | None]:
++    """Select the registry used by real planning requests.
++
++    The legacy registry remains the default-compatible path. Subagents require
++    an LLM configuration; without one, fallback is explicit and observable.
++    """
++    from app.agents.subagents.registry import create_default_subagent_registry
++    from app.agents.workers.registry import create_default_registry
++
++    mode = _travel_agent_mode()
++    if mode == "supervisor":
++        return create_default_registry(), None
++
++    if not settings.dashscope_api_key.strip():
++        reason = DEGRADED_PLANNING_REASON
++        if settings.allow_legacy_fallback:
++            return create_default_registry(), reason
++        return create_default_subagent_registry(llm=None), reason
++
++    try:
++        from app.agents.llm import get_llm
++
++        llm = get_llm()
++    except Exception:
++        if settings.allow_legacy_fallback:
++            return create_default_registry(), DEGRADED_PLANNING_REASON
++        return create_default_subagent_registry(llm=None), DEGRADED_PLANNING_REASON
++    return create_default_subagent_registry(llm=llm), None
++
++
++async def run_travel_planning(requirement, **kwargs):
++    """Run planning through the configured production registry."""
++    from app.agents.supervisor import run_travel_planning as supervisor_runner
++
++    registry = kwargs.pop("registry", None)
++    fallback_reason = None
++    if registry is None:
++        registry, fallback_reason = create_planning_registry()
++
++    draft = await supervisor_runner(requirement, registry=registry, **kwargs)
++    if fallback_reason is None:
++        return draft
++
++    warnings = list(dict.fromkeys([*draft.warnings, DEGRADED_PLANNING_MARKER]))
++    return draft.model_copy(
++        update={
++            "status": "degraded",
++            "degraded_reason": fallback_reason,
++            "warnings": warnings,
++        }
++    )
++
++
++async def create_chat_agent():
++    """Create a graph with the registry selected for the configured mode."""
++    registry, _fallback_reason = create_planning_registry()
++    from app.agents.supervisor import create_supervisor_graph
+ 
+-    return await create_supervisor_agent()
++    return create_supervisor_graph(registry=registry)
+diff --git a/app/agents/subagents/base.py b/app/agents/subagents/base.py
+index 03473e5..25e8e2d 100644
+--- a/app/agents/subagents/base.py
++++ b/app/agents/subagents/base.py
+@@ -11,20 +11,32 @@ from pydantic import BaseModel, Field
+ 
+ from app.agents.subagents.tool_policy import ToolPolicy
+ from app.agents.subagents.tools import ProviderError, normalize_tool_result
+ from app.research.deep_search import DeepSearchRequest, run_deep_search
+ from app.schemas.planning import Evidence, ResearchTask, TaskType, TravelRequirement
+ from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport, SubagentResponse
+ 
+ 
+ ToolBuilder = Callable[[TaskType], Awaitable[Iterable[Any]] | Iterable[Any]]
+ DeepSearchRunner = Callable[..., Awaitable[ResearchReport]]
++EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
++
++
++def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
++    try:
++        signature = inspect.signature(callable_obj)
++    except (TypeError, ValueError):
++        return False
++    return keyword in signature.parameters or any(
++        parameter.kind == inspect.Parameter.VAR_KEYWORD
++        for parameter in signature.parameters.values()
++    )
+ 
+ 
+ class SubagentAnalysis(BaseModel):
+     """Validated model output before evidence grounding."""
+ 
+     summary: str = ""
+     claims: list[Claim] = Field(default_factory=list)
+     candidates: list[EvidenceBoundCandidate] = Field(default_factory=list)
+     warnings: list[str] = Field(default_factory=list)
+ 
+@@ -59,47 +71,54 @@ class DomainSubagent:
+         self._providers: dict[str, Any] = {
+             self._canonical_provider(name): provider
+             for name, provider in providers.items()
+             if provider is not None
+         }
+ 
+     async def run(
+         self,
+         task: ResearchTask,
+         requirement: TravelRequirement,
++        *,
++        event_callback: EventCallback | None = None,
+     ) -> SubagentResponse:
+         """Run provider fallback and return only structured, grounded facts."""
+ 
+         if task.task_type != self.worker:
+             return self._failure_response(
+                 task,
+                 f"Task type {task.task_type} does not match subagent {self.worker}.",
+             )
+ 
+         warnings: list[str] = []
+         evidence: list[Evidence] = []
+         research_report: ResearchReport | None = None
+ 
+         for provider in self.provider_order:
+             provider_evidence, provider_warnings = await self._invoke_provider(
+                 provider,
+                 task,
+                 requirement,
++                event_callback=event_callback,
+             )
+             warnings.extend(provider_warnings)
+             if provider_evidence:
+                 evidence = provider_evidence
+                 break
+ 
+         if not evidence and self.allow_deep_search:
+             try:
+-                research_report = await self._run_deep_search(task, requirement)
++                research_report = await self._run_deep_search(
++                    task,
++                    requirement,
++                    event_callback=event_callback,
++                )
+             except Exception as exc:
+                 warnings.append(f"Deep Search failed: {type(exc).__name__}.")
+                 research_report = ResearchReport(
+                     status="unavailable",
+                     warnings=["Deep Search provider is unavailable."],
+                 )
+             if research_report is not None:
+                 warnings.extend(research_report.warnings)
+                 evidence = self._normalize_evidence(
+                     research_report.evidence,
+@@ -291,41 +310,53 @@ class DomainSubagent:
+     def _text_supported(text: str, evidence_text: str) -> bool:
+         normalized_text = " ".join(re.findall(r"\w+", text.casefold()))
+         normalized_evidence = " ".join(re.findall(r"\w+", evidence_text.casefold()))
+         return bool(normalized_text) and normalized_text in normalized_evidence
+ 
+     async def _invoke_provider(
+         self,
+         provider: str,
+         task: ResearchTask,
+         requirement: TravelRequirement,
++        *,
++        event_callback: EventCallback | None = None,
+     ) -> tuple[list[Evidence], list[str]]:
+         tool = await self._tool_for(provider)
+         if tool is None:
+             return [], [f"{provider} is unavailable for {self.worker}."]
+ 
+         payload = self._provider_payload(provider, task, requirement)
+         try:
++            if event_callback is not None:
++                await event_callback(
++                    "subagent_tool_called",
++                    {
++                        "tool_name": getattr(tool, "name", None) or provider,
++                        "round_number": 1,
++                    },
++                )
+             raw_result = await self._call_tool(tool, payload)
+         except Exception as exc:
+             raw_result = exc
+ 
+         normalized = self._normalized_provider_result(provider, raw_result)
+         evidence = [item for item in normalized if isinstance(item, Evidence)]
+         errors = [item for item in normalized if isinstance(item, ProviderError)]
+         warnings = [f"{error.provider}: {error.code}" for error in errors]
+         return self._normalize_evidence(evidence, provider), warnings
+ 
+     async def _run_deep_search(
+         self,
+         task: ResearchTask,
+         requirement: TravelRequirement,
++        *,
++        event_callback: EventCallback | None = None,
+     ) -> ResearchReport | None:
+         if not self.allow_deep_search:
+             return None
+ 
+         search_provider = await self._tool_for("search_mcp") or await self._tool_for("deep_research")
+         if search_provider is None:
+             return ResearchReport(
+                 status="unavailable",
+                 warnings=["Deep Search skipped because no search provider is available."],
+             )
+@@ -334,29 +365,42 @@ class DomainSubagent:
+             payload = self._provider_payload("search_mcp", task, requirement)
+             payload["query"] = query
+             payload["limit"] = limit
+             raw_result = await self._call_tool(search_provider, payload)
+             normalized = self._normalized_provider_result("search_mcp", raw_result)
+             return self._normalize_evidence(
+                 [item for item in normalized if isinstance(item, Evidence)],
+                 "deep_research",
+             )
+ 
++        async def deep_search_event(event_type: str, payload: dict[str, Any]) -> None:
++            if event_callback is not None:
++                await event_callback(
++                    event_type,
++                    {
++                        "tool_name": getattr(search_provider, "name", None) or "search_mcp",
++                        **payload,
++                    },
++                )
++
+         request = DeepSearchRequest.from_task(
+             task,
+             tool_policy=self.policy,
+             max_rounds=2,
+             max_tool_calls=3,
+             timeout_seconds=10.0,
+             results_per_query=3,
+         )
+-        return await self._deep_search(request, search=search)
++        kwargs: dict[str, Any] = {"search": search}
++        if event_callback is not None and _supports_keyword(self._deep_search, "event_callback"):
++            kwargs["event_callback"] = deep_search_event
++        return await self._deep_search(request, **kwargs)
+ 
+     async def _tool_for(self, provider: str) -> Any | None:
+         provider = self._canonical_provider(provider)
+         if provider in self._providers:
+             return self._providers[provider]
+ 
+         await self._ensure_built_tools()
+         for tool in self._tools:
+             if self._tool_matches_provider(tool, provider):
+                 self._providers[provider] = tool
+diff --git a/app/agents/subagents/registry.py b/app/agents/subagents/registry.py
+index 45f6df6..76995db 100644
+--- a/app/agents/subagents/registry.py
++++ b/app/agents/subagents/registry.py
+@@ -1,53 +1,69 @@
+ """Registry for domain subagent workers."""
+ 
+ from __future__ import annotations
+ 
++import inspect
+ from collections.abc import Callable, Iterable
+ from typing import Any
+ 
+ from app.agents.subagents.attractions import AttractionsSubagent
+ from app.agents.subagents.base import DomainSubagent, ToolBuilder
+ from app.agents.subagents.food import FoodSubagent
+ from app.agents.subagents.hotel import HotelSubagent
+ from app.agents.subagents.tools import build_subagent_tools
+ from app.agents.subagents.transport import TransportSubagent
+ from app.agents.subagents.weather import WeatherSubagent
+ from app.schemas.planning import ResearchTask, TaskType, TravelRequirement
+ from app.schemas.research import SubagentResponse
+ 
+ 
++def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
++    try:
++        signature = inspect.signature(callable_obj)
++    except (TypeError, ValueError):
++        return False
++    return keyword in signature.parameters or any(
++        parameter.kind == inspect.Parameter.VAR_KEYWORD
++        for parameter in signature.parameters.values()
++    )
++
++
+ class SubagentRegistry:
+     """Run the registered domain subagent for a research task."""
+ 
+     def __init__(self, workers: dict[TaskType, DomainSubagent]):
+         self._workers = dict(workers)
+ 
+     @property
+     def workers(self) -> dict[TaskType, DomainSubagent]:
+         return dict(self._workers)
+ 
+     async def run(
+         self,
+         task: ResearchTask,
+         requirement: TravelRequirement,
++        *,
++        event_callback=None,
+     ) -> SubagentResponse:
+         worker = self._workers.get(task.task_type)
+         if worker is None:
+             return SubagentResponse(
+                 task_id=task.id,
+                 worker=task.task_type,
+                 status="failed",
+                 summary="No registered domain subagent is available.",
+                 warnings=[f"Unregistered subagent worker: {task.task_type}"],
+             )
+         try:
++            if event_callback is not None and _supports_keyword(worker.run, "event_callback"):
++                return await worker.run(task, requirement, event_callback=event_callback)
+             return await worker.run(task, requirement)
+         except Exception as exc:
+             return SubagentResponse(
+                 task_id=task.id,
+                 worker=task.task_type,
+                 status="failed",
+                 summary="Domain subagent execution failed.",
+                 warnings=[f"{type(exc).__name__}: {exc}"],
+             )
+ 
+diff --git a/app/agents/supervisor.py b/app/agents/supervisor.py
+index c2fe2c9..b6ad564 100644
+--- a/app/agents/supervisor.py
++++ b/app/agents/supervisor.py
+@@ -2,20 +2,21 @@
+ 
+ 图结构（确定性 DAG）：
+     planner → dispatch ⇄ run_worker（按依赖分组扇出，组内并行）
+             → route_planner → budget → synthesize → END
+ 
+ 只有 synthesize 节点使用 LLM（可用时），其余全部是确定性函数。
+ """
+ 
+ from __future__ import annotations
+ 
++import inspect
+ from datetime import timedelta
+ from typing import Annotated, Any, TypedDict
+ from uuid import uuid4
+ 
+ from langgraph.graph import END, START, StateGraph
+ from langgraph.types import Send
+ from pydantic import BaseModel, Field
+ 
+ from app.agents.planner import create_research_plan, parallel_groups
+ from app.agents.subagents.registry import create_default_subagent_registry
+@@ -198,20 +199,31 @@ def _coerce_subagent_response(result: Any, task: ResearchTask) -> SubagentRespon
+     if isinstance(result, SubagentResponse):
+         return result
+     if isinstance(result, WorkerResult):
+         return _worker_result_to_subagent_response(result)
+     try:
+         return SubagentResponse.model_validate(result)
+     except Exception:
+         return _worker_result_to_subagent_response(WorkerResult.model_validate(result))
+ 
+ 
++def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
++    try:
++        signature = inspect.signature(callable_obj)
++    except (TypeError, ValueError):
++        return False
++    return keyword in signature.parameters or any(
++        parameter.kind == inspect.Parameter.VAR_KEYWORD
++        for parameter in signature.parameters.values()
++    )
++
++
+ def _worker_results_from_state(state: SupervisorState) -> list[WorkerResult]:
+     values = _worker_result_mapping(state.get("worker_results", {})).values()
+     return [WorkerResult.model_validate(value) for value in values]
+ 
+ 
+ def build_itinerary(
+     requirement: TravelRequirement,
+     results: list[WorkerResult],
+ ) -> list[ItineraryDay]:
+     """确定性路线编排：把候选项轮转分配到逐日时段。
+@@ -406,25 +418,49 @@ def create_supervisor_graph(
+                     "conversation_id": state.get("conversation_id"),
+                 },
+             )
+             for task in tasks
+         ]
+ 
+     async def worker_node(state: SupervisorState) -> dict[str, Any]:
+         requirement = TravelRequirement.model_validate(state["requirement"])
+         task = ResearchTask.model_validate(state["task"])
+         await emit(state, "worker_started", {"task_id": task.id, "worker": task.task_type})
++
++        async def emit_worker_event(event_type: str, payload: dict[str, Any] | None = None):
++            await emit(
++                state,
++                event_type,
++                {
++                    "task_id": task.id,
++                    "worker": task.task_type,
++                    **(payload or {}),
++                },
++            )
++
+         is_mock = False
+         try:
+-            raw_result = await registry.run(task, requirement)
++            if _supports_keyword(registry.run, "event_callback"):
++                raw_result = await registry.run(
++                    task,
++                    requirement,
++                    event_callback=emit_worker_event,
++                )
++            else:
++                raw_result = await registry.run(task, requirement)
+             is_mock = isinstance(raw_result, WorkerResult) and raw_result.is_mock
+             response = _coerce_subagent_response(raw_result, task)
++            if response.research_report and response.research_report.conflicts:
++                await emit_worker_event(
++                    "research_conflict",
++                    {"conflict_count": len(response.research_report.conflicts)},
++                )
+             result = _subagent_response_to_worker_result(response, governance, is_mock=is_mock)
+         except Exception as exc:
+             result = WorkerResult(
+                 task_id=task.id,
+                 worker=task.task_type,
+                 status="failed",
+                 summary="Domain subagent execution failed.",
+                 warnings=[f"{type(exc).__name__}: {exc}"],
+                 is_mock=is_mock,
+             )
+diff --git a/app/api/v1/planning.py b/app/api/v1/planning.py
+index b1af1e7..fafbb72 100644
+--- a/app/api/v1/planning.py
++++ b/app/api/v1/planning.py
+@@ -1,17 +1,17 @@
+ """任务、事件、审批、偏好和正式行程 API。"""
+ 
+ from uuid import uuid4
+ 
+ from fastapi import APIRouter, Depends, HTTPException, status
+ 
+-from app.agents.supervisor import run_travel_planning
++from app.agents import factory as agent_factory
+ from app.api.dependencies import get_current_user
+ from app.core.checkpointer import get_checkpointer
+ from app.governance.approvals import ApprovalService
+ from app.governance.events import TaskEventService
+ from app.governance.itineraries import ItineraryGovernanceService
+ from app.governance.postgres import (
+     PostgresApprovalRepository,
+     PostgresEventRepository,
+     PostgresItineraryRepository,
+     PostgresPreferenceRepository,
+@@ -20,20 +20,25 @@ from app.governance.postgres import (
+ from app.memory.defaults import apply_preference_defaults, resolve_preference_defaults
+ from app.memory.service import MemoryGovernanceService
+ from app.models.user import User
+ from app.schemas.governance import ApprovalDecisionRequest, ItinerarySaveRequest, PreferenceProposalRequest
+ from app.schemas.planning import TravelRequirement
+ from app.utils.logger import app_logger
+ 
+ router = APIRouter(tags=["旅行规划任务"])
+ 
+ 
++async def run_travel_planning(*args, **kwargs):
++    """Compatibility seam for tests and callers replacing the planning runner."""
++    return await agent_factory.run_travel_planning(*args, **kwargs)
++
++
+ @router.post("/tasks")
+ async def create_planning_task(requirement: TravelRequirement, user: User = Depends(get_current_user)):
+     task_id = uuid4().hex
+     event_service = TaskEventService(PostgresEventRepository())
+     try:
+         defaults = await resolve_preference_defaults(str(user.id), PostgresPreferenceRepository())
+     except Exception as exc:
+         app_logger.warning(f"读取长期偏好失败，按无偏好处理: task_id={task_id} error={exc}", exc_info=True)
+         defaults = {}
+     requirement = apply_preference_defaults(requirement, defaults)
+diff --git a/app/api/v1/tools.py b/app/api/v1/tools.py
+index 28271c8..d03d5ad 100644
+--- a/app/api/v1/tools.py
++++ b/app/api/v1/tools.py
+@@ -1,40 +1,45 @@
+ """Tool-result SSE API."""
+ 
+ import asyncio
+ import json
+ from contextlib import suppress
+ from datetime import timedelta
+ 
+ from fastapi import APIRouter, Depends, HTTPException, status
+ from fastapi.responses import StreamingResponse
+ 
+-from app.agents.supervisor import run_travel_planning
++from app.agents import factory as agent_factory
+ from app.api.dependencies import get_current_user
+ from app.core.checkpointer import get_checkpointer
+ from app.governance.events import PublishingEventRepository, TaskEventService, task_event_to_sse_event
+ from app.governance.postgres import PostgresEventRepository
+ from app.governance.tool_invocations import PostgresToolInvocationRepository
+ from app.models.base import async_session_maker
+ from app.models.message import Message
+ from app.models.user import User
+ from app.schemas.events import SSEEvent
+ from app.schemas.planning import TravelRequirement
+ from app.schemas.tools import ToolResultRequest
+ from app.services.open_qa import answer_open_question
+ from app.services.planning import render_plan_markdown
+ 
+ 
+ router = APIRouter(prefix="/chat/tools", tags=["chat tools"])
+ PROCESSING_LEASE_TIMEOUT = timedelta(minutes=2)
+ 
+ 
++async def run_travel_planning(*args, **kwargs):
++    """Compatibility seam for tests and callers replacing the planning runner."""
++    return await agent_factory.run_travel_planning(*args, **kwargs)
++
++
+ class ProcessingLeaseLostError(RuntimeError):
+     pass
+ 
+ 
+ def sse(data: dict) -> str:
+     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+ 
+ 
+ async def save_assistant_message(conversation_id: str, content: str, extra_info: dict) -> None:
+     async with async_session_maker() as db:
+diff --git a/app/config.py b/app/config.py
+index be9a858..59d0032 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -2,20 +2,22 @@
+ 配置管理模块
+ 使用 pydantic-settings 管理环境变量
+ """
+ import os
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ from pydantic import Field
+ from functools import lru_cache
+ 
+ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ SUPPORTED_TRAVEL_AGENT_MODES = {"supervisor", "supervisor_subagents"}
++DEGRADED_PLANNING_REASON = "no_llm_or_provider"
++DEGRADED_PLANNING_MARKER = "planning_degraded:no_llm_or_provider"
+ 
+ # ======== 环境兼容性修复（课件没有，但本地环境必需） ========
+ # 问题：本机开了代理（如 Clash 端口 7897），代理会把发往阿里云国内服务的请求
+ #       转发到海外节点，导致 dashscope.aliyuncs.com 的 SSL 握手失败。
+ # 修复：把阿里云域名加入 NO_PROXY，让相关请求绕过代理直连。
+ _no_proxy = os.environ.get("NO_PROXY", "")
+ _aliyun_domains = "aliyuncs.com,dashscope.aliyuncs.com,.aliyuncs.com,localhost,127.0.0.1"
+ if _aliyun_domains not in _no_proxy:
+     new_value = f"{_no_proxy},{_aliyun_domains}" if _no_proxy else _aliyun_domains
+     os.environ["NO_PROXY"] = new_value
+diff --git a/app/research/deep_search.py b/app/research/deep_search.py
+index 104a565..5935953 100644
+--- a/app/research/deep_search.py
++++ b/app/research/deep_search.py
+@@ -10,20 +10,21 @@ from typing import Any
+ 
+ from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+ 
+ from app.agents.subagents.tool_policy import ToolPolicy
+ from app.rag.evidence import is_evidence_fresh
+ from app.schemas.planning import Evidence, ResearchTask, TaskType
+ from app.schemas.research import Claim, ResearchConflict, ResearchReport
+ 
+ 
+ SearchFunction = Callable[[str, int], Awaitable[list[Evidence]]]
++EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+ 
+ HARD_MAX_ROUNDS = 3
+ HARD_MAX_TOOL_CALLS = 5
+ HARD_MAX_TIMEOUT_SECONDS = 15.0
+ 
+ 
+ class DeepSearchRequest(BaseModel):
+     """Input for one bounded Deep Search run."""
+ 
+     model_config = ConfigDict(arbitrary_types_allowed=True, str_strip_whitespace=True)
+@@ -301,20 +302,21 @@ def _final_report(state: DeepSearchState) -> DeepSearchReport:
+         planned_queries=state.planned_queries,
+     )
+ 
+ 
+ async def run_deep_search(
+     request: DeepSearchRequest,
+     *,
+     search: SearchFunction,
+     evaluator: Any | None = None,
+     now: datetime | None = None,
++    event_callback: EventCallback | None = None,
+ ) -> ResearchReport:
+     """Run bounded Deep Search with typed evaluator-controlled transitions."""
+ 
+     state = DeepSearchState(request=request)
+     max_rounds, max_tool_calls, timeout_seconds, limit_warnings = _limit_warnings(request)
+     state.warnings.extend(limit_warnings)
+     now = now or datetime.now(timezone.utc)
+     deadline = asyncio.get_running_loop().time() + timeout_seconds
+ 
+     policy = _policy_for(request)
+@@ -336,20 +338,32 @@ async def run_deep_search(
+         if remaining <= 0:
+             state.warnings.append("Deep Search total timeout reached.")
+             break
+         if state.tool_calls >= max_tool_calls:
+             state.warnings.append("Deep Search stopped before follow-up because tool call limit was reached.")
+             break
+         if query in completed_query_set:
+             state.warnings.append("Deep Search stopped because the follow-up query duplicated a completed query.")
+             break
+ 
++        round_number = state.rounds + 1
++        if event_callback is not None:
++            await event_callback(
++                "subagent_tool_called",
++                {"round_number": round_number},
++            )
++            if round_number > 1:
++                await event_callback(
++                    "follow_up_search",
++                    {"round_number": round_number},
++                )
++
+         state.planned_queries.append(query)
+         found, warning = await _call_search(
+             search,
+             query,
+             request.results_per_query,
+             min(timeout_seconds, remaining),
+         )
+         state.tool_calls += 1
+         state.rounds += 1
+         state.completed_queries.append(query)
+diff --git a/app/schemas/planning.py b/app/schemas/planning.py
+index cad45a1..4fc7963 100644
+--- a/app/schemas/planning.py
++++ b/app/schemas/planning.py
+@@ -4,20 +4,21 @@ from __future__ import annotations
+ 
+ from datetime import date, datetime, timezone
+ from typing import Any, Literal
+ from uuid import uuid4
+ 
+ from pydantic import BaseModel, ConfigDict, Field, model_validator
+ 
+ 
+ TaskType = Literal["attractions", "transport", "hotel", "food", "weather"]
+ WorkerStatus = Literal["completed", "partial", "unavailable", "failed"]
++PlanningStatus = Literal["draft", "degraded"]
+ 
+ 
+ class TravelRequirement(BaseModel):
+     """一次国内旅行规划所需的最小结构化需求。"""
+ 
+     model_config = ConfigDict(str_strip_whitespace=True)
+ 
+     origin: str | None = Field(default=None, min_length=1, max_length=80)
+     destination: str = Field(min_length=1, max_length=80)
+     departure_date: date
+@@ -144,11 +145,12 @@ class BudgetSummary(BaseModel):
+     notes: list[str] = Field(default_factory=list)
+ 
+ 
+ class TravelPlanDraft(BaseModel):
+     requirement: TravelRequirement
+     itinerary: list[ItineraryDay]
+     budget: BudgetSummary
+     worker_results: list[WorkerResult]
+     evidence: list[Evidence]
+     warnings: list[str] = Field(default_factory=list)
+-    status: Literal["draft"] = "draft"
++    status: PlanningStatus = "draft"
++    degraded_reason: Literal["no_llm_or_provider"] | None = None
+diff --git a/tests/test_phase2_mock_rag_e2e.py b/tests/test_phase2_mock_rag_e2e.py
+index 246a836..3445900 100644
+--- a/tests/test_phase2_mock_rag_e2e.py
++++ b/tests/test_phase2_mock_rag_e2e.py
+@@ -93,25 +93,24 @@ class ExplodingWorker(TravelWorker):
+ 
+ @pytest.mark.asyncio
+ async def test_confirmed_form_runs_supervisor_once_across_five_category_scoped_workers(monkeypatch):
+     user = SimpleNamespace(id=uuid4())
+     repository = InMemoryInvocationRepository([invocation(user_id=str(user.id))])
+     configure_endpoint(monkeypatch, repository)
+     from app.api.v1 import tools
+ 
+     calls = []
+     real_run_travel_planning = tools.run_travel_planning
+-    registry = build_local_registry(LocalKnowledgeService())
+ 
+     async def counting_run_travel_planning(requirement, **kwargs):
+         calls.append(requirement)
+-        return await real_run_travel_planning(requirement, registry=registry, **kwargs)
++        return await real_run_travel_planning(requirement, **kwargs)
+ 
+     monkeypatch.setattr(tools, "run_travel_planning", counting_run_travel_planning, raising=False)
+ 
+     payload = {
+         "tool": "collect_trip_requirements",
+         "status": "completed",
+         "result": {"destination": "成都", "departure_date": "2026-09-01", "days": 3},
+     }
+ 
+     async with endpoint_client(user) as client:
+diff --git a/tests/test_subagent_end_to_end.py b/tests/test_subagent_end_to_end.py
+index eed719f..9ee9925 100644
+--- a/tests/test_subagent_end_to_end.py
++++ b/tests/test_subagent_end_to_end.py
+@@ -143,45 +143,53 @@ async def test_factory_accepts_supervisor_subagents_mode_and_builds_supervisor_g
+     from app.agents import supervisor
+ 
+     calls = []
+ 
+     class FakeRegistry:
+         async def run(self, task, requirement):  # pragma: no cover - compile-time dependency only
+             raise AssertionError("factory test should not execute graph workers")
+ 
+     def create_registry():
+         calls.append("registry")
+-        return FakeRegistry()
++        return FakeRegistry(), None
+ 
+     monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor_subagents")
+-    monkeypatch.setattr(supervisor, "create_default_subagent_registry", create_registry)
++    monkeypatch.setattr(factory, "create_planning_registry", create_registry)
+ 
+     graph = await factory.create_chat_agent()
+ 
+     assert graph is not None
+     assert calls == ["registry"]
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_factory_preserves_supervisor_mode_compatibility(monkeypatch):
+     from app.agents import factory
+     from app.agents import supervisor
+ 
+     sentinel = object()
++    captured = {}
+ 
+-    async def create_supervisor_agent():
++    def create_graph(*, registry):
++        captured["registry"] = registry
+         return sentinel
+ 
++    class FakeRegistry:
++        async def run(self, task, requirement):
++            raise AssertionError("compatibility test should not execute graph workers")
++
+     monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor")
+-    monkeypatch.setattr(supervisor, "create_supervisor_agent", create_supervisor_agent)
++    monkeypatch.setattr(factory, "create_planning_registry", lambda: (FakeRegistry(), None))
++    monkeypatch.setattr(supervisor, "create_supervisor_graph", create_graph)
+ 
+     assert await factory.create_chat_agent() is sentinel
++    assert isinstance(captured["registry"], FakeRegistry)
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_factory_still_rejects_unsupported_modes(monkeypatch):
+     from app.agents import factory
+ 
+     monkeypatch.setattr(factory.settings, "travel_agent_mode", "handoffs")
+ 
+     with pytest.raises(ValueError, match="TRAVEL_AGENT_MODE=handoffs"):
+         await factory.create_chat_agent()
+diff --git a/tests/test_subagent_events_sse.py b/tests/test_subagent_events_sse.py
+index e5e2d8c..4bc7ae7 100644
+--- a/tests/test_subagent_events_sse.py
++++ b/tests/test_subagent_events_sse.py
+@@ -1,18 +1,25 @@
+ import json
+ from contextlib import asynccontextmanager
+ from datetime import datetime, timezone
+ 
+ import pytest
+ 
++from app.agents import supervisor as supervisor_module
++from app.agents.subagents.base import DomainSubagent
++from app.agents.subagents.registry import SubagentRegistry
++from app.agents.subagents.tools import ReadOnlyTool
+ from app.api.v1 import tools
+ from app.governance.tool_invocations import ProcessingOutcome, ToolInvocationRecord
++from app.research.deep_search import DeepSearchEvaluation, run_deep_search
++from app.schemas.planning import Evidence
++from app.schemas.research import ResearchConflict, SubagentResponse
+ from app.schemas.tools import ToolResultRequest
+ 
+ 
+ class InMemoryProcessingRepository:
+     def __init__(self):
+         self.record = ToolInvocationRecord(
+             call_id="call-subagent-events",
+             user_id="user-1",
+             conversation_id="conversation-1",
+             tool="collect_trip_requirements",
+@@ -91,20 +98,55 @@ class RecordingSession:
+     def add(self, message):
+         self.messages.append(message)
+ 
+ 
+ class FakeDraft:
+     def model_dump(self, *, mode):
+         assert mode == "json"
+         return {"destination": "Kyoto", "summary": "confirmed itinerary"}
+ 
+ 
++class EmptyLegacyWorker:
++    async def run(self, task, requirement):
++        return SubagentResponse(
++            task_id=task.id,
++            worker=task.task_type,
++            status="unavailable",
++            summary="No evidence available.",
++            warnings=["legacy worker has no provider"],
++        )
++
++
++class FollowUpEvaluator:
++    def __init__(self):
++        self.calls = 0
++
++    async def evaluate(self, state):
++        self.calls += 1
++        return DeepSearchEvaluation(
++            needs_follow_up=self.calls == 1,
++            follow_up_query="official follow-up query",
++            conflicts=(
++                [
++                    ResearchConflict(
++                        fact_key="opening_status",
++                        values=["open", "closed"],
++                        evidence_ids=["search-1", "search-2"],
++                        description="hidden conflict details",
++                    )
++                ]
++                if self.calls == 2
++                else []
++            ),
++        )
++
++
+ @asynccontextmanager
+ async def session_factory(session):
+     yield session
+ 
+ 
+ def parse_sse(frame):
+     return json.loads(frame.removeprefix("data: ").strip())
+ 
+ 
+ async def run_fake_planning_stream(monkeypatch):
+@@ -178,20 +220,105 @@ async def run_fake_planning_stream(monkeypatch):
+         parse_sse(frame)
+         async for frame in tools.tool_result_stream(
+             repository.record.call_id,
+             data,
+             repository.record.user_id,
+             repository.record.model_copy(deep=True),
+         )
+     ]
+ 
+ 
++async def run_real_planning_event_stream(monkeypatch):
++    repository = InMemoryProcessingRepository()
++    event_repository = RecordingEventRepository()
++    session = RecordingSession()
++    search_queries = []
++
++    async def empty_local_rag(_payload):
++        return []
++
++    async def search_provider(payload):
++        search_queries.append(payload["query"])
++        index = len(search_queries)
++        return [
++            Evidence(
++                id=f"search-{index}",
++                content=f"search result {index}",
++                source="web",
++                metadata={
++                    "fact_key": "opening_status",
++                    "fact_value": "open" if index == 1 else "closed",
++                },
++            )
++        ]
++
++    evaluator = FollowUpEvaluator()
++
++    async def deep_search(request, *, search, event_callback=None):
++        kwargs = {"event_callback": event_callback} if event_callback is not None else {}
++        return await run_deep_search(request, search=search, evaluator=evaluator, **kwargs)
++
++    attractions = DomainSubagent(
++        worker="attractions",
++        provider_order=("local_rag",),
++        tools=[
++            ReadOnlyTool(name="local_rag", provider="local_rag", _handler=empty_local_rag),
++            ReadOnlyTool(name="web_search", provider="search_mcp", _handler=search_provider),
++        ],
++        deep_search=deep_search,
++    )
++    workers = {
++        "attractions": attractions,
++        **{worker: EmptyLegacyWorker() for worker in ("weather", "transport", "hotel", "food")},
++    }
++    registry = SubagentRegistry(workers)
++
++    monkeypatch.setattr(tools, "PostgresToolInvocationRepository", lambda: repository)
++    monkeypatch.setattr(tools, "PostgresEventRepository", lambda: event_repository)
++    monkeypatch.setattr(tools, "async_session_maker", lambda: session)
++
++    async def fake_checkpointer():
++        return None
++
++    async def real_supervisor(requirement, **kwargs):
++        return await supervisor_module.run_travel_planning(
++            requirement,
++            registry=registry,
++            **kwargs,
++        )
++
++    monkeypatch.setattr(tools, "get_checkpointer", fake_checkpointer)
++    monkeypatch.setattr(tools, "run_travel_planning", real_supervisor)
++    monkeypatch.setattr(supervisor_module.settings, "dashscope_api_key", "")
++
++    data = ToolResultRequest.model_validate(
++        {
++            "tool": "collect_trip_requirements",
++            "status": "completed",
++            "result": {
++                "destination": "Kyoto",
++                "departure_date": "2026-08-03",
++                "days": 4,
++            },
++        }
++    )
++    return [
++        parse_sse(frame)
++        async for frame in tools.tool_result_stream(
++            repository.record.call_id,
++            data,
++            repository.record.user_id,
++            repository.record.model_copy(deep=True),
++        )
++    ]
++
++
+ @pytest.mark.asyncio
+ async def test_subagent_events_keep_monotonic_sequence_and_legacy_fields(monkeypatch):
+     events = await run_fake_planning_stream(monkeypatch)
+ 
+     assert [event["type"] for event in events] == [
+         "subagent_started",
+         "evidence_collected",
+         "subagent_completed",
+         "result",
+         "token",
+@@ -220,10 +347,49 @@ async def test_subagent_events_expose_only_public_typed_metadata(monkeypatch):
+         "evidence_count": 2,
+     }
+     assert research_events[2]["payload"] == {
+         "task_id": "research-attractions",
+         "worker": "attractions",
+         "status": "completed",
+         "evidence_count": 1,
+         "conflict_count": 1,
+         "warning_codes": ["max_rounds"],
+     }
++
++
++@pytest.mark.asyncio
++async def test_real_subagent_tool_follow_up_and_conflict_events_are_emitted(monkeypatch):
++    events = await run_real_planning_event_stream(monkeypatch)
++    research_events = [
++        event
++        for event in events
++        if event["type"] in {"subagent_tool_call", "follow_up_search", "research_conflict"}
++    ]
++    event_types = [event["type"] for event in research_events]
++
++    assert "subagent_tool_call" in event_types
++    assert "follow_up_search" in event_types
++    assert "research_conflict" in event_types
++
++    tool_event = next(event for event in research_events if event["type"] == "subagent_tool_call")
++    assert tool_event["payload"]["worker"] == "attractions"
++    assert tool_event["payload"]["tool_name"] == "local_rag"
++    assert tool_event["payload"]["round_number"] == 1
++    task_id = tool_event["payload"]["task_id"]
++
++    follow_up_event = next(event for event in research_events if event["type"] == "follow_up_search")
++    assert follow_up_event["payload"] == {
++        "task_id": task_id,
++        "worker": "attractions",
++        "tool_name": "web_search",
++        "round_number": 2,
++    }
++
++    conflict_event = next(event for event in research_events if event["type"] == "research_conflict")
++    assert conflict_event["payload"] == {
++        "task_id": task_id,
++        "worker": "attractions",
++        "conflict_count": 1,
++    }
++    serialized = json.dumps(research_events)
++    assert "hidden" not in serialized
++    assert "opening_status" not in serialized
+diff --git a/tests/test_task7_review_fix.py b/tests/test_task7_review_fix.py
+new file mode 100644
+index 0000000..c79d7a9
+--- /dev/null
++++ b/tests/test_task7_review_fix.py
+@@ -0,0 +1,159 @@
++from datetime import date
++from types import SimpleNamespace
++
++import pytest
++
++from app.agents import factory
++from app.agents.subagents.registry import SubagentRegistry
++from app.agents.workers.registry import WorkerRegistry
++from app.api.v1 import planning as planning_api
++from app.api.v1 import tools as tools_api
++from app.schemas.planning import BudgetSummary, TravelPlanDraft, TravelRequirement
++
++from tests.test_trip_form_tool_flow import (
++    FakeDraft,
++    InMemoryInvocationRepository,
++    configure_endpoint,
++    endpoint_client,
++    invocation,
++    parse_sse,
++)
++
++
++def requirement() -> TravelRequirement:
++    return TravelRequirement(
++        destination="Chengdu",
++        departure_date=date(2026, 9, 1),
++        days=3,
++    )
++
++
++def draft_for(requirement: TravelRequirement) -> TravelPlanDraft:
++    return TravelPlanDraft(
++        requirement=requirement,
++        itinerary=[],
++        budget=BudgetSummary(),
++        worker_results=[],
++        evidence=[],
++    )
++
++
++def test_factory_selects_legacy_registry_for_supervisor_mode(monkeypatch):
++    monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor")
++
++    registry, fallback_reason = factory.create_planning_registry()
++
++    assert isinstance(registry, WorkerRegistry)
++    assert fallback_reason is None
++
++
++def test_factory_selects_subagent_registry_for_subagent_mode(monkeypatch):
++    monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor_subagents")
++    monkeypatch.setattr(factory.settings, "dashscope_api_key", "configured")
++
++    registry, fallback_reason = factory.create_planning_registry()
++
++    assert isinstance(registry, SubagentRegistry)
++    assert fallback_reason is None
++
++
++@pytest.mark.asyncio
++async def test_chat_agent_graph_receives_mode_selected_registry(monkeypatch):
++    from app.agents import supervisor
++
++    registry = object()
++    captured = {}
++
++    def fake_registry():
++        return registry, None
++
++    def fake_graph(*, registry):
++        captured["registry"] = registry
++        return "graph"
++
++    monkeypatch.setattr(factory, "create_planning_registry", fake_registry)
++    monkeypatch.setattr(supervisor, "create_supervisor_graph", fake_graph)
++
++    assert await factory.create_chat_agent() == "graph"
++    assert captured["registry"] is registry
++
++
++@pytest.mark.asyncio
++async def test_factory_fallback_marks_no_llm_planning_as_degraded(monkeypatch):
++    monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor_subagents")
++    monkeypatch.setattr(factory.settings, "dashscope_api_key", "")
++    monkeypatch.setattr(factory.settings, "allow_legacy_fallback", True)
++    captured = {}
++
++    async def fake_run(requirement, **kwargs):
++        captured["registry"] = kwargs["registry"]
++        return draft_for(requirement)
++
++    monkeypatch.setattr("app.agents.supervisor.run_travel_planning", fake_run)
++
++    result = await factory.run_travel_planning(requirement())
++
++    assert isinstance(captured["registry"], WorkerRegistry)
++    assert result.status == "degraded"
++    assert "planning_degraded:no_llm_or_provider" in result.warnings
++
++
++@pytest.mark.asyncio
++async def test_planning_endpoint_uses_configured_factory_runner(monkeypatch):
++    captured = {}
++
++    async def fake_run(requirement, **kwargs):
++        captured["requirement"] = requirement
++        return draft_for(requirement)
++
++    monkeypatch.setattr(factory, "run_travel_planning", fake_run)
++    monkeypatch.setattr(planning_api, "PostgresPreferenceRepository", lambda: _EmptyPreferences())
++    monkeypatch.setattr(planning_api, "PostgresEventRepository", lambda: None)
++    monkeypatch.setattr(planning_api, "TaskEventService", lambda *_args: None)
++    monkeypatch.setattr(planning_api, "get_checkpointer", lambda: _none())
++
++    result = await planning_api.create_planning_task(requirement(), SimpleNamespace(id="user-1"))
++
++    assert captured["requirement"].destination == "Chengdu"
++    assert result["draft"]["status"] == "draft"
++
++
++@pytest.mark.asyncio
++async def test_tool_endpoint_uses_configured_factory_runner(monkeypatch):
++    user = SimpleNamespace(id="user-1")
++    repository = InMemoryInvocationRepository([invocation(user_id=user.id)])
++    configure_endpoint(monkeypatch, repository)
++    captured = {}
++
++    async def fake_run(requirement, **kwargs):
++        captured["requirement"] = requirement
++        return FakeDraft(requirement.destination)
++
++    monkeypatch.setattr(factory, "run_travel_planning", fake_run)
++
++    async with endpoint_client(user) as client:
++        response = await client.post(
++            "/api/v1/chat/tools/call-1/result",
++            json={
++                "tool": "collect_trip_requirements",
++                "status": "completed",
++                "result": {
++                    "destination": "Kyoto",
++                    "departure_date": "2026-08-03",
++                    "days": 4,
++                },
++            },
++        )
++
++    events = parse_sse(response)
++    assert captured["requirement"].destination == "Kyoto"
++    assert [event["type"] for event in events][-3:] == ["result", "token", "done"]
++
++
++class _EmptyPreferences:
++    async def list(self, _user_id):
++        return []
++
++
++async def _none():
++    return None

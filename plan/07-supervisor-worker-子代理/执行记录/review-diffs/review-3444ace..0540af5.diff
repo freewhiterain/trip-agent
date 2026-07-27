@@ -1,0 +1,339 @@
+# Review package: 3444ace..0540af5
+
+## Commits
+0540af5 fix: bind subagent claims to cited evidence
+0ef7e33 fix: harden domain subagent grounding
+
+## Files changed
+ app/agents/subagents/__init__.py | 45 +++++++++++++++++-----------
+ app/agents/subagents/base.py     | 62 ++++++++++++++++++++++++++++++++++----
+ tests/test_domain_subagents.py   | 65 +++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 148 insertions(+), 24 deletions(-)
+
+## Diff
+diff --git a/app/agents/subagents/__init__.py b/app/agents/subagents/__init__.py
+index 4e6d115..2132582 100644
+--- a/app/agents/subagents/__init__.py
++++ b/app/agents/subagents/__init__.py
+@@ -1,20 +1,29 @@
+-"""Domain subagent building blocks."""
++"""Domain subagent building blocks with lazy exports to avoid import cycles."""
+ 
+-from app.agents.subagents.attractions import AttractionsSubagent
+-from app.agents.subagents.base import DomainSubagent
+-from app.agents.subagents.food import FoodSubagent
+-from app.agents.subagents.hotel import HotelSubagent
+-from app.agents.subagents.registry import SubagentRegistry, create_default_subagent_registry
+-from app.agents.subagents.transport import TransportSubagent
+-from app.agents.subagents.weather import WeatherSubagent
++from importlib import import_module
+ 
+-__all__ = [
+-    "AttractionsSubagent",
+-    "DomainSubagent",
+-    "FoodSubagent",
+-    "HotelSubagent",
+-    "SubagentRegistry",
+-    "TransportSubagent",
+-    "WeatherSubagent",
+-    "create_default_subagent_registry",
+-]
++
++_EXPORTS = {
++    "AttractionsSubagent": ("app.agents.subagents.attractions", "AttractionsSubagent"),
++    "DomainSubagent": ("app.agents.subagents.base", "DomainSubagent"),
++    "FoodSubagent": ("app.agents.subagents.food", "FoodSubagent"),
++    "HotelSubagent": ("app.agents.subagents.hotel", "HotelSubagent"),
++    "SubagentRegistry": ("app.agents.subagents.registry", "SubagentRegistry"),
++    "TransportSubagent": ("app.agents.subagents.transport", "TransportSubagent"),
++    "WeatherSubagent": ("app.agents.subagents.weather", "WeatherSubagent"),
++    "create_default_subagent_registry": (
++        "app.agents.subagents.registry",
++        "create_default_subagent_registry",
++    ),
++}
++
++
++def __getattr__(name: str):
++    try:
++        module_name, attribute = _EXPORTS[name]
++    except KeyError as exc:
++        raise AttributeError(name) from exc
++    return getattr(import_module(module_name), attribute)
++
++
++__all__ = list(_EXPORTS)
+diff --git a/app/agents/subagents/base.py b/app/agents/subagents/base.py
+index 6146c0a..03473e5 100644
+--- a/app/agents/subagents/base.py
++++ b/app/agents/subagents/base.py
+@@ -1,15 +1,16 @@
+ """Shared runner for evidence-grounded domain subagents."""
+ 
+ from __future__ import annotations
+ 
+ import inspect
++import re
+ from collections.abc import Awaitable, Callable, Iterable, Mapping
+ from typing import Any
+ 
+ from pydantic import BaseModel, Field
+ 
+ from app.agents.subagents.tool_policy import ToolPolicy
+ from app.agents.subagents.tools import ProviderError, normalize_tool_result
+ from app.research.deep_search import DeepSearchRequest, run_deep_search
+ from app.schemas.planning import Evidence, ResearchTask, TaskType, TravelRequirement
+ from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport, SubagentResponse
+@@ -83,21 +84,28 @@ class DomainSubagent:
+                 provider,
+                 task,
+                 requirement,
+             )
+             warnings.extend(provider_warnings)
+             if provider_evidence:
+                 evidence = provider_evidence
+                 break
+ 
+         if not evidence and self.allow_deep_search:
+-            research_report = await self._run_deep_search(task, requirement)
++            try:
++                research_report = await self._run_deep_search(task, requirement)
++            except Exception as exc:
++                warnings.append(f"Deep Search failed: {type(exc).__name__}.")
++                research_report = ResearchReport(
++                    status="unavailable",
++                    warnings=["Deep Search provider is unavailable."],
++                )
+             if research_report is not None:
+                 warnings.extend(research_report.warnings)
+                 evidence = self._normalize_evidence(
+                     research_report.evidence,
+                     "deep_research",
+                 )
+ 
+         if not evidence:
+             return SubagentResponse(
+                 task_id=task.id,
+@@ -188,21 +196,21 @@ class DomainSubagent:
+                 }
+             )
+ 
+     def _deterministic_analysis(self, evidence: list[Evidence]) -> SubagentAnalysis:
+         candidates = [
+             EvidenceBoundCandidate(
+                 id=item.id,
+                 name=self._evidence_title(item),
+                 category=self.worker,
+                 description=item.content[:240],
+-                attributes={"source": item.source},
++                attributes={},
+                 evidence_ids=[item.id] if item.id else [],
+             )
+             for item in evidence
+         ]
+         claims = [
+             Claim(text=item.content[:240], evidence_ids=[item.id])
+             for item in evidence
+             if item.id
+         ]
+         return SubagentAnalysis(
+@@ -212,42 +220,86 @@ class DomainSubagent:
+             warnings=["This result is an evidence summary, not a live recommendation."],
+         )
+ 
+     def _ground_analysis(
+         self,
+         analysis: SubagentAnalysis,
+         evidence: list[Evidence],
+     ) -> tuple[SubagentAnalysis, list[str]]:
+         evidence_ids = {item.id for item in evidence if item.id}
+         warnings: list[str] = []
++        evidence_text = " ".join(item.content for item in evidence)
++        evidence_by_id = {item.id: item for item in evidence if item.id}
+ 
+         claims: list[Claim] = []
+         for claim in analysis.claims:
+             claim_ids = set(claim.evidence_ids)
+-            if not claim_ids or not claim_ids.issubset(evidence_ids):
++            referenced_text = " ".join(
++                evidence_by_id[evidence_id].content
++                for evidence_id in claim_ids
++                if evidence_id in evidence_by_id
++            )
++            if (
++                not claim_ids
++                or not claim_ids.issubset(evidence_ids)
++                or not self._text_supported(claim.text, referenced_text)
++            ):
+                 warnings.append("Dropped an unbound claim from subagent output.")
+                 continue
+             claims.append(claim)
+ 
+         candidates: list[EvidenceBoundCandidate] = []
+         for candidate in analysis.candidates:
+             candidate_ids = set(candidate.evidence_ids)
+-            if not candidate.name.strip() or not candidate_ids or not candidate_ids.issubset(evidence_ids):
++            referenced_text = " ".join(
++                evidence_by_id[evidence_id].content
++                for evidence_id in candidate_ids
++                if evidence_id in evidence_by_id
++            )
++            if (
++                not candidate.name.strip()
++                or not candidate_ids
++                or not candidate_ids.issubset(evidence_ids)
++                or not self._text_supported(candidate.name, referenced_text)
++                or (
++                    candidate.description
++                    and not self._text_supported(candidate.description, referenced_text)
++                )
++                or (
++                    candidate.estimated_cost is not None
++                    and not self._text_supported(str(candidate.estimated_cost), referenced_text)
++                )
++                or any(
++                    not self._text_supported(str(value), referenced_text)
++                    for value in candidate.attributes.values()
++                )
++            ):
+                 warnings.append(f"Dropped an unbound {self.worker} candidate from subagent output.")
+                 continue
+             candidates.append(candidate)
+ 
++        summary = analysis.summary
++        if summary and not self._text_supported(summary, evidence_text):
++            warnings.append("Dropped an unsupported subagent summary.")
++            summary = ""
++
+         return (
+-            analysis.model_copy(update={"claims": claims, "candidates": candidates}),
++            analysis.model_copy(update={"summary": summary, "claims": claims, "candidates": candidates}),
+             warnings,
+         )
+ 
++    @staticmethod
++    def _text_supported(text: str, evidence_text: str) -> bool:
++        normalized_text = " ".join(re.findall(r"\w+", text.casefold()))
++        normalized_evidence = " ".join(re.findall(r"\w+", evidence_text.casefold()))
++        return bool(normalized_text) and normalized_text in normalized_evidence
++
+     async def _invoke_provider(
+         self,
+         provider: str,
+         task: ResearchTask,
+         requirement: TravelRequirement,
+     ) -> tuple[list[Evidence], list[str]]:
+         tool = await self._tool_for(provider)
+         if tool is None:
+             return [], [f"{provider} is unavailable for {self.worker}."]
+ 
+diff --git a/tests/test_domain_subagents.py b/tests/test_domain_subagents.py
+index 65d885c..34b6cf6 100644
+--- a/tests/test_domain_subagents.py
++++ b/tests/test_domain_subagents.py
+@@ -1,20 +1,21 @@
+ import pytest
+ 
+ from app.agents.subagents.attractions import AttractionsSubagent
+ from app.agents.subagents.food import FoodSubagent
+ from app.agents.subagents.hotel import HotelSubagent
+ from app.agents.subagents.registry import SubagentRegistry, create_default_subagent_registry
+ from app.agents.subagents.transport import TransportSubagent
+ from app.agents.subagents.weather import WeatherSubagent
+ from app.schemas.planning import Evidence, ResearchTask, TravelRequirement
+-from app.schemas.research import ResearchReport
++from app.schemas.research import Claim, EvidenceBoundCandidate, ResearchReport
++from app.agents.subagents.base import SubagentAnalysis
+ 
+ 
+ def requirement() -> TravelRequirement:
+     return TravelRequirement(
+         origin="Shanghai",
+         destination="Chengdu",
+         departure_date="2026-08-01",
+         days=3,
+         adults=2,
+         styles=["family"],
+@@ -161,20 +162,82 @@ async def test_food_subagent_uses_bounded_deep_search_only_after_rag_and_search_
+     )
+ 
+     result = await agent.run(task("food"), requirement())
+ 
+     assert result.status == "completed"
+     assert [call[0].worker for call in deep_search.calls] == ["food"]
+     assert result.research_report == deep_report
+     assert result.candidates[0].evidence_ids == ["ev-deep"]
+ 
+ 
++def test_subagent_drops_content_not_supported_by_referenced_evidence():
++    agent = AttractionsSubagent()
++    analysis = SubagentAnalysis(
++        summary="invented summary",
++        claims=[Claim(text="invented claim", evidence_ids=["ev-1"])],
++        candidates=[EvidenceBoundCandidate(
++            name="invented place",
++            description="invented details",
++            estimated_cost=9999,
++            attributes={"availability": "guaranteed"},
++            evidence_ids=["ev-1"],
++        )],
++    )
++
++    grounded, warnings = agent._ground_analysis(
++        analysis,
++        [Evidence(id="ev-1", content="Panda Base is open in the morning.", source="official")],
++    )
++
++    assert grounded.claims == []
++    assert grounded.candidates == []
++    assert grounded.summary == ""
++    assert len(warnings) >= 2
++
++
++def test_subagent_does_not_use_unreferenced_evidence_to_ground_a_claim():
++    agent = AttractionsSubagent()
++    analysis = SubagentAnalysis(
++        claims=[Claim(text="Rain is expected.", evidence_ids=["ev-1"])],
++    )
++
++    grounded, warnings = agent._ground_analysis(
++        analysis,
++        [
++            Evidence(id="ev-1", content="Panda Base is open.", source="official"),
++            Evidence(id="ev-2", content="Rain is expected.", source="weather"),
++        ],
++    )
++
++    assert grounded.claims == []
++    assert any("unbound claim" in warning.lower() for warning in warnings)
++
++
++@pytest.mark.asyncio
++async def test_deep_search_failure_returns_structured_unavailable_response():
++    async def failing_deep_search(*args, **kwargs):
++        raise RuntimeError("provider secret should not escape")
++
++    agent = FoodSubagent(
++        rag=FakeProvider("local_rag", []),
++        search=FakeProvider("search_mcp", []),
++        deep_search=failing_deep_search,
++    )
++
++    result = await agent.run(task("food"), requirement())
++
++    assert result.status == "unavailable"
++    assert result.evidence == []
++    assert any("deep search" in warning.lower() for warning in result.warnings)
++    assert all("secret" not in warning for warning in result.warnings)
++
++
+ @pytest.mark.asyncio
+ async def test_subagent_registry_returns_structured_failure_for_unregistered_worker():
+     registry = SubagentRegistry({})
+ 
+     result = await registry.run(task("food"), requirement())
+ 
+     assert result.status == "failed"
+     assert result.worker == "food"
+     assert result.candidates == []
+     assert result.evidence == []
