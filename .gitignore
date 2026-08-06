@@ -71,5 +71,7 @@ tests/*.md
 # Playwright 浏览器二进制（体积大，按需本地安装）
 .playwright-browsers/
 
-# Skill 工具目录（已迁移到 D:\Desktop\project\dev）
+# Skill 工具目录、规划文档（已迁移到 D:\Desktop\project\dev）
 .superpowers/
+plan/
+docs/
