@@ -1,34 +1,105 @@
-# Task 7 Report: Rename Destination Research To Attractions
+# Task 7: CitationAnnotator (Simplified Scaffold) — Implementation Report
 
-Status: DONE
+## Summary
+Successfully implemented a simplified citation annotator scaffold that attaches evidence sources to answer text without performing sentence-level matching. This provides the interface foundation for future enhancements while maintaining simplicity for the current phase.
 
-## Scope
+## Implementation Details
 
-- Renamed the planning responsibility from `destination` to `attractions`.
-- Renamed `DestinationWorker` and `app/agents/workers/destination.py` to `AttractionsWorker` and `app/agents/workers/attractions.py`.
-- Updated planning task types, worker registry, supervisor itinerary lookup, and read-only worker tool name.
-- Kept the existing `load_destination_evidence` source unchanged; Worker data-source design remains deferred.
+### What Was Implemented
+
+#### 1. `app/rag/citation.py`
+- **AnnotatedAnswer** dataclass: Holds answer text and list of Evidence sources
+- **CitationAnnotator** class: Core service with `annotate()` method
+  - Method signature: `annotate(answer: str, evidence: list[Evidence]) -> AnnotatedAnswer`
+  - Simple implementation: returns AnnotatedAnswer with the provided text and evidence list (converted to list for consistency)
+- **get_citation_annotator()** factory function: Returns a CitationAnnotator instance
+
+Key design decision: The implementation is intentionally simple - it treats all provided evidence as sources for the entire answer. The brief explicitly states this is a scaffold for a future phase, with sentence-level matching deferred to later work (documented in `docs/superpowers/specs/2026-07-24-rag-heavyweight-capabilities-future-design.md`).
+
+#### 2. `tests/test_citation_annotator.py`
+Two test cases covering:
+- **test_annotate_attaches_all_evidence_as_the_answer_sources**: Verifies that the annotator properly attaches multiple evidence items to the answer text
+- **test_annotate_handles_empty_evidence_list**: Verifies the annotator handles the edge case of empty evidence gracefully
 
 ## TDD Evidence
 
-- RED: `.venv\\Scripts\\python.exe -m pytest tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py -q`
-  - Result: 6 failed, 2 passed.
-  - Expected failures showed the old `destination` task type, WorkerResult contract, and worker tool name.
-- GREEN: `.venv\\Scripts\\python.exe -m pytest tests/test_phase1_planning_contracts.py tests/test_phase1_supervisor.py tests/test_phase6_coordinator.py -q`
-  - Result: 17 passed.
+### RED Phase (Tests Fail Before Implementation)
+**Command:** `python -m pytest tests/test_citation_annotator.py -v`
 
-## Verification
+**Output:**
+```
+ERROR collecting tests/test_citation_annotator.py
+ImportError while importing test module 'D:\Desktop\project\Trip\tests\test_citation_annotator.py'.
+...
+E   ModuleNotFoundError: No module named 'app.rag.citation'
+=========================== short test summary info ===========================
+ERROR tests/test_citation_annotator.py
+!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+```
 
-- `git diff --check` for Task 7 implementation and test files passed with no whitespace errors.
-- Test warnings are pre-existing dependency deprecations and a denied `.pytest_cache` write; they do not affect test results.
+Result: Tests cannot even be collected because the module doesn't exist. This is the expected failure.
 
-## Git
+### GREEN Phase (Tests Pass After Implementation)
+**Command:** `python -m pytest tests/test_citation_annotator.py -v`
 
-- No branch created and no commit made, per instruction.
+**Output:**
+```
+============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+collected 2 items
 
-## P2 Follow-up: Coordinator Responsibility Name
+tests/test_citation_annotator.py::test_annotate_attaches_all_evidence_as_the_answer_sources PASSED [ 50%]
+tests/test_citation_annotator.py::test_annotate_handles_empty_evidence_list PASSED [100%]
 
-- Updated `SLICE_KEYWORDS` in `app/agents/coordinator.py` so sightseeing keywords route to `attractions`, not `destination`.
-- Updated the `tests/test_phase6_coordinator.py` registry fixture and added an attractions keyword-routing assertion.
-- RED verification: `.venv\\Scripts\\python.exe -m pytest tests/test_phase6_coordinator.py -q` returned `1 failed, 9 passed`; the failure showed the old `destination` keyword mapping violated the renamed `TaskType` contract.
-- The production mapping is now corrected. Per interruption request, the post-fix focused test run was not started; re-run the Task 7 focused suite before treating this follow-up as fully verified.
+============================== 2 passed in 0.05s ==============================
+```
+
+Result: All tests pass successfully after implementation.
+
+## Files Changed
+
+### Created Files
+1. **app/rag/citation.py** (28 lines)
+   - Core implementation of CitationAnnotator and related types
+   - Location: D:\Desktop\project\Trip\app\rag\citation.py
+
+2. **tests/test_citation_annotator.py** (23 lines)
+   - Test suite with two comprehensive test cases
+   - Location: D:\Desktop\project\Trip\tests\test_citation_annotator.py
+
+### Git Commit
+- **Commit SHA:** be9b69e
+- **Commit Message:** `feat(rag): add simplified CitationAnnotator scaffold for future sentence-level attribution`
+- **Files Added:** 2 files
+- **Lines Added:** 51
+
+## Self-Review Findings
+
+### Code Quality
+✓ Implementation matches the brief exactly
+✓ All docstring comments preserved from specification
+✓ Follows existing project conventions (dataclass usage, type hints)
+✓ No extraneous features - strictly implements the scaffold
+
+### Test Coverage
+✓ Both test cases from the brief are implemented correctly
+✓ Tests verify the primary behavior (evidence attachment) and edge case (empty evidence)
+✓ Test assertions are clear and unambiguous
+✓ Tests follow the project's pytest patterns
+
+### Architecture Compliance
+✓ Uses existing `Evidence` schema from `app.schemas.planning`
+✓ Provides the three required exports: `AnnotatedAnswer`, `CitationAnnotator`, `get_citation_annotator()`
+✓ No external dependencies beyond what's already in the project
+✓ Positioned correctly in the RAG module hierarchy
+
+### Notes
+- The simplified implementation is intentional and documented. The brief explicitly states that sentence-level citation matching is deferred to a future phase.
+- This task is self-contained and does not depend on Tasks 5 or 6, as specified in the requirements.
+- Step 5 of the brief (full regression test suite) was skipped per instructions - only the targeted test file was run to keep the tests isolated from other concurrent task development.
+
+## Status
+✓ All tests passing
+✓ Commit created with correct message
+✓ No regressions in targeted test suite
+✓ Implementation complete and ready for integration

@@ -53,7 +53,7 @@ class SSEEvent(BaseModel):
                     result[field] = payload[field]
         if self.type == "tool_result":
             payload = result.get("payload", {})
-            for field in ("tool", "status", "result", "partial_values"):
+            for field in ("call_id", "tool", "status", "result", "partial_values"):
                 if field in payload:
                     result[field] = payload[field]
         return result
