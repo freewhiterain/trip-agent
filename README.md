@@ -9,13 +9,30 @@
 编辑 `.env` 文件，填入必要的 API Key：
 
 ```
-DASHSCOPE_API_KEY=sk-你的千问APIKey   # 必填
+LLM_API_KEY=sk-你的模型APIKey         # 必填
+LLM_MODEL=deepseek-v4-flash           # 默认值，按供应商调整
+LLM_BASE_URL=https://api.deepseek.com # 默认值，OpenAI 兼容接口即可
 LANGSMITH_API_KEY=你的LangSmithKey    # 推荐
 AMAP_API_KEY=你的高德Key              # 第7章需要
 TAVILY_API_KEY=你的TavilyKey          # 第7章需要
 ```
 
-DashScope 注册：https://dashscope.aliyun.com/
+DeepSeek 注册：https://platform.deepseek.com/
+
+对话模型只要求 OpenAI 兼容接口，换供应商改这三个变量即可，不用动代码。
+注意 `LLM_DISABLE_THINKING`：DeepSeek 的 thinking 模式不支持强制 `tool_choice`，
+而结构化输出正是靠它，保持 `true` 才能让路由、需求抽取、Worker 分析和行程合成
+拿到结构化结果。
+
+### 第一步之二：启动本地 Ollama（Embedding 用）
+
+Embedding 走本地 Ollama，不依赖任何外部 API Key，也不受对话模型供应商影响：
+
+```powershell
+ollama pull qwen3-embedding:4b
+```
+
+未启动 Ollama 时 Dense 检索会退化成纯 BM25（有日志告警，不会中断请求）。
 
 ### 第二步：启动 Docker 数据库
 
@@ -90,7 +107,7 @@ data/documents/    # RAG 文档库（放 .md 攻略文件）
 
 ## 技术栈
 
-LangGraph 1.0 · LangChain 1.0 · FastAPI · PostgreSQL 17 + pgvector · Redis · ChromaDB · Qwen-Max · SSE
+LangGraph 1.0 · LangChain 1.0 · FastAPI · PostgreSQL 17 + pgvector · ChromaDB · DeepSeek（OpenAI 兼容）· 本地 Ollama Embedding · SSE
 
 ## 当前实现状态
 
@@ -121,7 +138,7 @@ LangGraph 1.0 · LangChain 1.0 · FastAPI · PostgreSQL 17 + pgvector · Redis �
 
 ## 关键配置
 
-复制 `.env.example` 为 `.env`，至少配置独立的 `JWT_SECRET_KEY` 和 `DASHSCOPE_API_KEY`。实时数据需要显式设置 `ENABLE_EXTERNAL_TOOLS=true`，并配置相应的 `AMAP_API_KEY`、`TAVILY_API_KEY` 或 MCP 服务地址。
+复制 `.env.example` 为 `.env`，至少配置独立的 `JWT_SECRET_KEY` 和 `LLM_API_KEY`。Embedding 走本地 Ollama（`EMBEDDING_BASE_URL` / `EMBEDDING_MODEL`），不需要外部 Key。实时数据需要显式设置 `ENABLE_EXTERNAL_TOOLS=true`，并配置相应的 `AMAP_API_KEY`、`TAVILY_API_KEY` 或 MCP 服务地址。
 
 ## 主要接口
 
