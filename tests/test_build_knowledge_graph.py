@@ -31,7 +31,7 @@ async def _noop_ensure_schema():
 
 @pytest.mark.asyncio
 async def test_build_graph_writes_rule_extracted_relations_without_llm(monkeypatch):
-    monkeypatch.setattr("scripts.build_knowledge_graph.settings.dashscope_api_key", "")
+    monkeypatch.setattr("scripts.build_knowledge_graph.settings.llm_api_key", "")
     documents = [
         mock_document("成都", "attractions", "### 宽窄巷子\n位于青羊区。\n", "attractions/chengdu.md"),
     ]
@@ -52,7 +52,7 @@ async def test_build_graph_writes_rule_extracted_relations_without_llm(monkeypat
 
 @pytest.mark.asyncio
 async def test_build_graph_skips_llm_extraction_when_not_configured(monkeypatch):
-    monkeypatch.setattr("scripts.build_knowledge_graph.settings.dashscope_api_key", "")
+    monkeypatch.setattr("scripts.build_knowledge_graph.settings.llm_api_key", "")
     documents = [mock_document("成都", "attractions", "### 宽窄巷子\n无关系描述。\n", "a.md")]
     service = _RecordingGraphService()
     llm_factory_calls = []
@@ -69,7 +69,7 @@ async def test_build_graph_skips_llm_extraction_when_not_configured(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_build_graph_continues_when_llm_extraction_fails(monkeypatch):
-    monkeypatch.setattr("scripts.build_knowledge_graph.settings.dashscope_api_key", "fake-key")
+    monkeypatch.setattr("scripts.build_knowledge_graph.settings.llm_api_key", "fake-key")
     documents = [mock_document("成都", "attractions", "### 宽窄巷子\n位于青羊区。\n", "a.md")]
     service = _RecordingGraphService()
 

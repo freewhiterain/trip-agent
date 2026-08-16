@@ -13,7 +13,7 @@ TODAY = date(2026, 7, 19)
 
 
 async def _extract(text: str, monkeypatch) -> TravelRequirementDraft:
-    monkeypatch.setattr("app.services.planning.settings.dashscope_api_key", "")
+    monkeypatch.setattr("app.services.planning.settings.llm_api_key", "")
     return await RequirementExtractor().extract(text, today=TODAY)
 
 

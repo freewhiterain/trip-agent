@@ -129,7 +129,7 @@ async def test_runtime_unavailability_degrades_draft_even_when_llm_is_configured
     async def deterministic_synthesis(_requirement, _results, template):
         return template
 
-    monkeypatch.setattr("app.agents.supervisor.settings.dashscope_api_key", "configured")
+    monkeypatch.setattr("app.agents.supervisor.settings.llm_api_key", "configured")
     monkeypatch.setattr("app.agents.supervisor.synthesize_itinerary_with_llm", deterministic_synthesis)
 
     draft = await run_travel_planning(_requirement(), registry=registry)

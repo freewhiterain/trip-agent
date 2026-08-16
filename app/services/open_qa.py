@@ -13,7 +13,7 @@ async def answer_open_question(query: str) -> str:
     if not evidence:
         return "暂时没有查到相关的本地资料，告诉我具体想去的城市，我可以帮你展开研究。"
 
-    if not settings.dashscope_api_key:
+    if not settings.llm_api_key:
         lines = ["为你找到以下相关资料：", ""]
         lines.extend(f"- {item.content}（来源：{item.source}）" for item in evidence[:4])
         return "\n".join(lines)

@@ -289,7 +289,7 @@ async def test_runtime_worker_unavailability_marks_draft_degraded_even_with_llm_
     async def deterministic_synthesis(_requirement, _results, template):
         return template
 
-    monkeypatch.setattr("app.agents.supervisor.settings.dashscope_api_key", "configured")
+    monkeypatch.setattr("app.agents.supervisor.settings.llm_api_key", "configured")
     monkeypatch.setattr(
         "app.agents.supervisor.synthesize_itinerary_with_llm",
         deterministic_synthesis,

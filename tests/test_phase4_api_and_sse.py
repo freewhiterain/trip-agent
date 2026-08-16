@@ -34,7 +34,7 @@ def test_sse_event_preserves_legacy_token_and_error_fields():
 
 @pytest.mark.asyncio
 async def test_rule_extractor_handles_common_complete_request(monkeypatch):
-    monkeypatch.setattr("app.services.planning.settings.dashscope_api_key", "")
+    monkeypatch.setattr("app.services.planning.settings.llm_api_key", "")
     draft = await RequirementExtractor().extract(
         "从上海出发，2026年8月1日去成都五日游，预算6000元，喜欢文化和美食"
     )

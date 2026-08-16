@@ -1,4 +1,6 @@
-"""共享的千问 LLM 构造入口。"""
+"""共享的 LLM 构造入口（OpenAI 兼容接口，供应商由 .env 决定）。"""
+
+from typing import Any
 
 import httpx
 from langchain_openai import ChatOpenAI
@@ -52,21 +54,43 @@ async def aclose_http_clients() -> None:
     _http_client = None
 
 
-def get_llm(temperature: float | None = None) -> ChatOpenAI:
-    """获取配置好的千问模型（兼容 OpenAI 接口）。
+class StructuredChatOpenAI(ChatOpenAI):
+    """把结构化输出固定走 function_calling 的 ChatOpenAI。
 
-    每次返回新的 ChatOpenAI（temperature 等参数按调用方变化），但底层
-    httpx 客户端是共享的。
+    langchain 默认用 `json_schema`（response_format），但 DeepSeek 对此返回
+    400 "This response_format type is unavailable now"。`json_mode` 又不校验
+    schema——实测会返回 action="plan_trip" 这种不在枚举里的值，等于把校验推给
+    下游。只有 function_calling 既被支持、又能保住 Pydantic 契约。
+
+    调用方仍可显式传 method 覆盖，换回支持 json_schema 的供应商时不用改这里。
+    """
+
+    def with_structured_output(self, schema=None, *, method: str = "function_calling", **kwargs: Any):
+        return super().with_structured_output(schema, method=method, **kwargs)
+
+
+def get_llm(temperature: float | None = None) -> StructuredChatOpenAI:
+    """获取配置好的对话模型（OpenAI 兼容接口）。
+
+    每次返回新的实例（temperature 等参数按调用方变化），但底层 httpx
+    客户端是共享的。
     """
     http_client_sync, http_async_client = _shared_http_clients()
 
-    return ChatOpenAI(
-        model=settings.qwen_model_name,
-        base_url=settings.qwen_base_url,
-        api_key=settings.dashscope_api_key,
-        temperature=settings.qwen_temperature if temperature is None else temperature,
-        max_tokens=settings.qwen_max_tokens,
+    extra_body: dict[str, Any] = {}
+    if settings.llm_disable_thinking:
+        # DeepSeek 专用开关；不认识这个字段的供应商会忽略它，认识但不接受的
+        # 会在第一次调用时直接报错，不会静默降级。
+        extra_body["thinking"] = {"type": "disabled"}
+
+    return StructuredChatOpenAI(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        temperature=settings.llm_temperature if temperature is None else temperature,
+        max_tokens=settings.llm_max_tokens,
         streaming=True,
         http_client=http_client_sync,
         http_async_client=http_async_client,
+        extra_body=extra_body or None,
     )

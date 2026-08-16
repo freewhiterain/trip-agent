@@ -122,7 +122,7 @@ async def test_subagent_end_to_end_result_keeps_traceable_task_and_evidence_even
 
 @pytest.mark.asyncio
 async def test_no_llm_or_provider_absence_returns_deterministic_degraded_draft(monkeypatch):
-    monkeypatch.setattr("app.agents.supervisor.settings.dashscope_api_key", "")
+    monkeypatch.setattr("app.agents.supervisor.settings.llm_api_key", "")
     registry = create_default_subagent_registry(build_tools=lambda _worker: [], llm=None)
 
     result = await run_travel_planning(chengdu_requirement(), registry=registry)

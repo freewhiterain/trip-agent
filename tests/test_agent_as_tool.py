@@ -204,7 +204,7 @@ async def test_routing_model_cannot_emit_an_agent_tool_action_without_a_tool_cal
         def with_structured_output(self, _schema):
             return StructuredOutput()
 
-    monkeypatch.setattr("app.services.main_agent.settings.dashscope_api_key", "configured")
+    monkeypatch.setattr("app.services.main_agent.settings.llm_api_key", "configured")
     monkeypatch.setattr("app.agents.llm.get_llm", lambda: Llm())
 
     decision = await MainAgentService(use_llm=True).decide("我想想看", [])

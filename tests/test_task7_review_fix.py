@@ -82,7 +82,7 @@ def test_factory_selects_legacy_registry_for_supervisor_mode(monkeypatch):
 
 def test_factory_selects_subagent_registry_for_subagent_mode(monkeypatch):
     monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor_subagents")
-    monkeypatch.setattr(factory.settings, "dashscope_api_key", "configured")
+    monkeypatch.setattr(factory.settings, "llm_api_key", "configured")
 
     registry, fallback_reason = factory.create_planning_registry()
 
@@ -114,7 +114,7 @@ async def test_chat_agent_graph_receives_mode_selected_registry(monkeypatch):
 @pytest.mark.asyncio
 async def test_factory_fallback_marks_no_llm_planning_as_degraded(monkeypatch):
     monkeypatch.setattr(factory.settings, "travel_agent_mode", "supervisor_subagents")
-    monkeypatch.setattr(factory.settings, "dashscope_api_key", "")
+    monkeypatch.setattr(factory.settings, "llm_api_key", "")
     monkeypatch.setattr(factory.settings, "allow_legacy_fallback", True)
     captured = {}
 

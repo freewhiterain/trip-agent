@@ -61,7 +61,7 @@ def test_temperature_override_still_takes_effect():
     overridden = llm_module.get_llm(temperature=0.3)
 
     assert overridden.temperature == 0.3
-    assert default.temperature == settings.qwen_temperature
+    assert default.temperature == settings.llm_temperature
 
 
 def test_reset_closes_the_shared_sync_client(monkeypatch):

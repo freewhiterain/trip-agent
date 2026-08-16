@@ -25,10 +25,10 @@ async def test_planning_draft_exposes_no_transaction_data():
 
 def test_jwt_uses_dedicated_secret(monkeypatch):
     monkeypatch.setattr(settings, "jwt_secret_key", "phase0-test-secret")
-    monkeypatch.setattr(settings, "dashscope_api_key", "model-key-a")
+    monkeypatch.setattr(settings, "llm_api_key", "model-key-a")
     token = create_access_token({"sub": "user-1"})
 
-    monkeypatch.setattr(settings, "dashscope_api_key", "model-key-b")
+    monkeypatch.setattr(settings, "llm_api_key", "model-key-b")
     assert decode_access_token(token)["sub"] == "user-1"
 
 

@@ -36,7 +36,7 @@ class RequirementExtractor:
     ) -> TravelRequirementDraft:
         today = today or date.today()
         draft = self._extract_rules(text, today)
-        if not draft.missing_fields() or not use_llm or not settings.dashscope_api_key:
+        if not draft.missing_fields() or not use_llm or not settings.llm_api_key:
             return draft
         try:
             from app.agents.llm import get_llm

@@ -6,8 +6,7 @@ from pathlib import Path
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_chroma import Chroma
-from langchain_community.embeddings import DashScopeEmbeddings
-from app.config import settings
+from app.rag.local_embeddings import get_ollama_embeddings
 from app.utils.logger import app_logger
 
 
@@ -24,10 +23,10 @@ class VectorStoreManager:
         self.collection_name = collection_name
         self.persist_directory.mkdir(parents=True, exist_ok=True)
 
-        self.embeddings = embeddings or DashScopeEmbeddings(
-            model="text-embedding-v2",
-            dashscope_api_key=settings.dashscope_api_key
-        )
+        # 默认走本地 Ollama。此前默认是 DashScopeEmbeddings，和对话模型共用
+        # 同一个 API Key；换 LLM 供应商时 embedding 会跟着一起失效，Dense 检索
+        # 静默退化成纯 BM25 而不报错。改成本地后两者彻底解耦。
+        self.embeddings = embeddings or get_ollama_embeddings()
         self.vectorstore = None
 
     def create_vectorstore(self, documents: List[Document]) -> Chroma:

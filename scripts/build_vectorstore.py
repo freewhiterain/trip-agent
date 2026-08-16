@@ -10,6 +10,15 @@
 
 from __future__ import annotations
 
+# === 兼容性修复：让脚本能按 docstring 写的方式直接运行 ===
+# python scripts/build_vectorstore.py 时 sys.path 不含项目根目录，
+# from app.xxx 会 ModuleNotFoundError。其余 scripts/ 下的脚本都有这段。
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# === 修复结束 ===
+
 from app.rag.document_loader import DocumentManager
 from app.rag.local_embeddings import LOCAL_MOCK_COLLECTION, get_ollama_embeddings
 from app.rag.text_splitter import ParentDocumentSplitter

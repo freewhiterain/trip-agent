@@ -48,14 +48,28 @@ class Settings(BaseSettings):
     )
 
     # ============== LLM 配置 ==============
-    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
-    qwen_model_name: str = Field(default="qwen-max", alias="QWEN_MODEL_NAME")
-    qwen_base_url: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        alias="QWEN_BASE_URL"
+    # 供应商无关：换模型只改 .env，不动代码。当前用 DeepSeek 的 OpenAI 兼容接口。
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_model: str = Field(default="deepseek-v4-flash", alias="LLM_MODEL")
+    llm_base_url: str = Field(
+        default="https://api.deepseek.com",
+        alias="LLM_BASE_URL"
     )
-    qwen_temperature: float = 0.7
-    qwen_max_tokens: int = 8000
+    llm_temperature: float = 0.7
+    llm_max_tokens: int = 8000
+    # DeepSeek 的 thinking 模式不支持强制 tool_choice，而 with_structured_output
+    # 恰恰靠强制 tool_choice 取结构化结果。不关掉它，全部结构化调用都会返回
+    # 400 "Thinking mode does not support this tool_choice"，路由、需求抽取、
+    # Worker 分析和行程合成会一起静默退化成兜底路径。
+    llm_disable_thinking: bool = Field(default=True, alias="LLM_DISABLE_THINKING")
+
+    # ============== Embedding 配置 ==============
+    # 走本地 Ollama，不依赖任何外部 API Key，也不受 LLM 供应商切换影响。
+    embedding_base_url: str = Field(
+        default="http://127.0.0.1:11434/v1",
+        alias="EMBEDDING_BASE_URL",
+    )
+    embedding_model: str = Field(default="qwen3-embedding:4b", alias="EMBEDDING_MODEL")
 
     # ============== LangSmith 配置 ==============
     langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")

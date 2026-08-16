@@ -39,7 +39,7 @@ async def build_graph(
     result = extract_from_documents(documents)
     relations: list[ExtractedRelation] = list(result.relations)
 
-    if settings.dashscope_api_key:
+    if settings.llm_api_key:
         if llm_factory is None:
             from app.agents.llm import get_llm as llm_factory  # type: ignore[assignment]
         try:
@@ -51,7 +51,7 @@ async def build_graph(
             for document in documents:
                 relations.extend(await extract_relations_with_llm(document, llm))
     else:
-        app_logger.info("未配置 DASHSCOPE_API_KEY，跳过 LLM 补充抽取，仅写入规则抽取结果。")
+        app_logger.info("未配置 LLM_API_KEY，跳过 LLM 补充抽取，仅写入规则抽取结果。")
 
     entities_by_city: dict[str, list[ExtractedEntity]] = {}
     for entity in result.entities:

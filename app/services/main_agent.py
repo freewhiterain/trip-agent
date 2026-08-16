@@ -159,7 +159,7 @@ class MainAgentService:
         return False
 
     def _llm_enabled(self) -> bool:
-        return self.use_llm is not False and bool(settings.dashscope_api_key)
+        return self.use_llm is not False and bool(settings.llm_api_key)
 
     async def _prefill(self, message: str) -> dict[str, Any]:
         draft = await RequirementExtractor().extract(message, use_llm=False)

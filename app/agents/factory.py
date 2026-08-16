@@ -33,7 +33,7 @@ def create_planning_registry() -> tuple[Any, str | None]:
     if mode == "supervisor":
         return create_default_registry(), None
 
-    if not settings.dashscope_api_key.strip():
+    if not settings.llm_api_key.strip():
         reason = DEGRADED_PLANNING_REASON
         if settings.allow_legacy_fallback:
             return create_default_registry(), reason

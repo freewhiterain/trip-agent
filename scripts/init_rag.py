@@ -3,7 +3,7 @@
 运行方式：python scripts/init_rag.py
 
 前提：
-1. 已配置 DASHSCOPE_API_KEY（用于 Embedding）
+1. 本地 Ollama 已启动，且已拉取 EMBEDDING_MODEL 指定的模型（默认 qwen3-embedding:4b）
 2. data/documents/ 目录下有 .md 文档
 """
 import asyncio

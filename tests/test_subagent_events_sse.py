@@ -288,7 +288,7 @@ async def run_real_planning_event_stream(monkeypatch):
 
     monkeypatch.setattr(tools, "get_checkpointer", fake_checkpointer)
     monkeypatch.setattr(tools, "run_travel_planning", real_supervisor)
-    monkeypatch.setattr(supervisor_module.settings, "dashscope_api_key", "")
+    monkeypatch.setattr(supervisor_module.settings, "llm_api_key", "")
 
     data = ToolResultRequest.model_validate(
         {

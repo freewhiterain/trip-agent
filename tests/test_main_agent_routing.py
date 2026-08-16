@@ -99,7 +99,7 @@ async def test_ambiguous_turn_uses_structured_llm_when_enabled(monkeypatch):
             assert schema.__name__ == "MainAgentDecision"
             return StructuredOutput()
 
-    monkeypatch.setattr("app.services.main_agent.settings.dashscope_api_key", "configured")
+    monkeypatch.setattr("app.services.main_agent.settings.llm_api_key", "configured")
     monkeypatch.setattr("app.agents.llm.get_llm", lambda: Llm())
 
     decision = await MainAgentService(use_llm=True).decide("我想想看", [])
@@ -115,7 +115,7 @@ async def test_prefill_never_calls_llm_or_fills_missing_date_and_days(monkeypatc
         calls.append(True)
         raise AssertionError("prefill must not call get_llm")
 
-    monkeypatch.setattr("app.services.main_agent.settings.dashscope_api_key", "configured")
+    monkeypatch.setattr("app.services.main_agent.settings.llm_api_key", "configured")
     monkeypatch.setattr("app.agents.llm.get_llm", unexpected_llm)
 
     decision = await MainAgentService(use_llm=True).decide("帮我规划一次成都旅行", [])
@@ -133,7 +133,7 @@ async def test_enabled_llm_without_key_does_not_attempt_routing_model(monkeypatc
         calls.append(True)
         raise AssertionError("routing must not call get_llm without a key")
 
-    monkeypatch.setattr("app.services.main_agent.settings.dashscope_api_key", "")
+    monkeypatch.setattr("app.services.main_agent.settings.llm_api_key", "")
     monkeypatch.setattr("app.agents.llm.get_llm", unexpected_llm)
 
     decision = await MainAgentService(use_llm=True).decide("我想想看", [])

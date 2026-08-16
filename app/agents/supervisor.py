@@ -250,7 +250,7 @@ async def synthesize_itinerary_with_llm(
     template: list[ItineraryDay],
 ) -> list[ItineraryDay]:
     """用 LLM 基于 Worker 证据润色行程；失败或无 Key 时退回模板。"""
-    if not settings.dashscope_api_key:
+    if not settings.llm_api_key:
         return template
     try:
         from app.agents.llm import get_llm
